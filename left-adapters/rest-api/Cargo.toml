@@ -1,0 +1,33 @@
+[package]
+name = "rest-api"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+e2e = []
+
+[dependencies]
+async-trait.workspace = true
+auth-core = { path = "../../core" }
+axum.workspace = true
+axum-extra.workspace = true
+chrono.workspace = true
+dotenvy.workspace = true
+jsonwebtoken.workspace = true
+kern.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+utoipa.workspace = true
+uuid.workspace = true
+write-model = { path = "../../right-adapters/write-model" }
+
+[dev-dependencies]
+mockall.workspace = true
+reqwest.workspace = true
+tokio.workspace = true

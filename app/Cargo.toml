@@ -1,0 +1,10 @@
+[package]
+name = "auth-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+auth-core = { path = "../core" }
+rest-api = { path = "../left-adapters/rest-api" }
+
+tokio.workspace = true

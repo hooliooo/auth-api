@@ -1,0 +1,20 @@
+[package]
+name = "write-model"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+auth-core = { path = "../../core" }
+chrono.workspace = true
+kern.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+ctor.workspace = true
+dtor.workspace = true
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+tokio.workspace = true

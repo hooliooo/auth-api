@@ -1,0 +1,18 @@
+[package]
+name = "auth-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+kern.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+validator.workspace = true
+
+[dev-dependencies]
+mockall.workspace = true

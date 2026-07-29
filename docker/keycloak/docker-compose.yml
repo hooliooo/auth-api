@@ -1,0 +1,49 @@
+services:
+  keycloak-postgres:
+    image: postgres
+    container_name: keycloak-postgres
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak_admin
+      POSTGRES_PASSWORD: test
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -d $$POSTGRES_DB -U $$POSTGRES_USER" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  keycloak-api:
+    image: keycloak-api
+    container_name: keycloak
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: test
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak_admin
+      KC_DB_PASSWORD: test
+      KC_METRICS_ENABLED: false
+      KC_HTTP_METRICS_HISTOGRAMS_ENABLED: false
+      KC_TRACING_SERVICE_NAME: keycloak-api
+      KC_TRACING_ENABLED: false
+    ports:
+      - "8080:8080"
+      - "9000:9000"
+    depends_on:
+      keycloak-postgres:
+        condition: service_healthy
+#    command: "start-dev --tracing-enabled=true --features=opentelemetry"
+    command: "start-dev"
+  smtp-server:
+    image: maildev/maildev
+    container_name: keycloak-smtp-server
+    ports:
+      - "1080:1080"
+      - "1025:1025"
+    healthcheck:
+      test: [ "CMD", "touch", "health" ] # Fake health check
+      interval: 15s
+      timeout: 5s
+      retries: 5
