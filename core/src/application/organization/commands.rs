@@ -23,6 +23,8 @@ pub struct CreateOrganization {
     aggregate_id: OrganizationId,
     name: String,
     display_name: String,
+    description: String,
+    is_enabled: bool,
     attributes: HashMap<String, HashSet<String>>,
     request_id: RequestId,
     environment: Environment,
@@ -38,6 +40,8 @@ impl CreateOrganization {
         aggregate_id: Uuid,
         name: String,
         display_name: String,
+        description: String,
+        is_enabled: bool,
         attributes: HashMap<String, HashSet<String>>,
         request_id: Uuid,
         environment: Environment,
@@ -49,6 +53,8 @@ impl CreateOrganization {
             aggregate_id: OrganizationId::new(aggregate_id),
             name,
             display_name,
+            description,
+            is_enabled,
             attributes,
             request_id: RequestId::new(request_id),
             environment,
@@ -63,12 +69,20 @@ impl CreateOrganization {
         &self.aggregate_id
     }
 
-    pub fn name(&self) -> &String {
+    pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn display_name(&self) -> &String {
+    pub fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.is_enabled
     }
 
     pub fn attributes(&self) -> &HashMap<String, HashSet<String>> {

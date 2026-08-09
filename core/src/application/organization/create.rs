@@ -2,6 +2,7 @@ use kern::{
     application::{
         error::forbidden_error::ForbiddenError, event::EventPublisher, use_case::UseCase,
     },
+    building_blocks::domain_event::DomainEvent,
     building_blocks::entity::Entity,
     building_blocks::error::domain_error::DomainError,
 };
@@ -11,10 +12,7 @@ use crate::{
     domain::{
         authorization::AuthorizationService,
         exception::RepositoryWriteError,
-        organization::{
-            Organization, OrganizationId, events::CREATED_ORGANIZATION,
-            repository::OrganizationWriteRepository,
-        },
+        organization::{Organization, OrganizationId, repository::OrganizationWriteRepository},
     },
 };
 use std::sync::Arc;
@@ -55,18 +53,23 @@ impl UseCase for CreateOrganizationUseCase {
             request.aggregate_id().value(),
             request.name().to_owned(),
             request.display_name().to_owned(),
+            request.description().to_owned(),
+            request.is_enabled(),
             request.attributes().clone(),
             0,
         )
         .map_err(CreateOrganizationError::Invariant)?;
 
+        // The event is handed to the repository so it lands in the outbox inside the same
+        // transaction as the aggregate. The publish below stays for in-process subscribers;
+        // the outbox row is what makes delivery survive a crash here.
         self.repository
-            .create(&organization)
+            .create(&organization, &event)
             .await
             .map_err(CreateOrganizationError::Database)?;
 
-        self.event_publisher
-            .publish(CREATED_ORGANIZATION, Arc::new(event));
+        let event_type = event.event_type();
+        self.event_publisher.publish(event_type, Arc::new(event));
         Ok(*organization.id())
     }
 }
@@ -115,7 +118,7 @@ mod tests {
             .expect_create()
             .times(1)
             .in_sequence(&mut sequence)
-            .returning(|_| Result::Ok(()));
+            .returning(|_, _| Result::Ok(()));
 
         let mut event_emitter = MockTestEventPublisher::new();
         event_emitter
@@ -134,12 +137,14 @@ mod tests {
             kern::application::environment::Environment::Development,
         );
 
-        let authorized_scope = AuthorizedScope::RealmAdmin;
+        let authorized_scope = AuthorizedScope::SuperAdmin;
         let command = command_factory
             .create(
                 Uuid::new_v4().to_string(),
                 "organization-a".to_string(),
                 "Organization A".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 AuthorizedParty::new("test.client".to_string()),
                 Uuid::new_v4().to_string(),

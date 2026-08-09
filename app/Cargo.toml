@@ -8,3 +8,4 @@ auth-core = { path = "../core" }
 rest-api = { path = "../left-adapters/rest-api" }
 
 tokio.workspace = true
+tracing.workspace = true

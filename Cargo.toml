@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "app",
+  "authentication",
   "core",
   "left-adapters/rest-api",
   "right-adapters/nats-event-publisher",
@@ -11,19 +12,19 @@ members = [
 [workspace.dependencies]
 anyhow = { version = "1.0.104" }
 async-nats = { version = "0.50.0" }
-async-trait = "0.1.91"
+async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["json", "tracing"] }
 axum-extra = { version = "0.12.6", features = ["typed-header"] }
 chrono = "0.4.45"
-ctor = "1.0.10"
+ctor = "1.0.12"
 dtor = "1.0.5"
 kern = { version = "0.1.0", git = "https://github.com/hooliooo/kern.git", features = [
   "axum",
   "event_bus",
+  "serde",
   "utoipa",
   "validator",
 ] }
-dotenvy = { version = "0.15.7" }
 jsonwebtoken = { version = "11.0.0", features = ["rust_crypto"] }
 mockall = "0.15.0"
 regex = { version = "1.13.1", features = ["std", "logging"] }
@@ -37,9 +38,10 @@ sqlx = { version = "0.9.0", features = [
   "runtime-tokio",
   "uuid",
 ] }
+# Held at 0.27 to match testcontainers-modules 0.15, which pins testcontainers ^0.27.
 testcontainers = { version = "0.27.3" }
 testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
-thiserror = { version = "2.0.19" }
+thiserror = { version = "2.0.20" }
 tokio = { version = "1.53.1", features = ["full"] }
 tower = { version = "0.5.3" }
 tower-http = { version = "0.7.0", features = ["trace"] }
@@ -52,4 +54,4 @@ utoipa = { version = "5.5.0", features = [
   "uuid",
 ] }
 uuid = { version = "1.24.0", features = ["v4", "v7"] }
-validator = { version = "0.20.0", features = ["derive"] }
+validator = { version = "0.21.0", features = ["derive"] }

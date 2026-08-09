@@ -1,0 +1,13 @@
+[package]
+name = "authentication"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait.workspace = true
+auth-core = { path = "../core" }
+jsonwebtoken.workspace = true
+kern.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true

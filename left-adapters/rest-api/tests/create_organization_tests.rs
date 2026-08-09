@@ -38,12 +38,12 @@ fn setup_state(created_id: Uuid) -> Router {
         .returning(move |_req| Ok(OrganizationId::new(created_id)));
     let mut jwt = MockJWT::new();
     jwt.expect_extract().returning(|| {
-        let authorized_scope = AuthorizedScope::RealmAdmin;
-        Claims {
+        let authorized_scope = AuthorizedScope::SuperAdmin;
+        Ok(Claims {
             client_id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),
             authorized_scope,
-        }
+        })
     });
 
     let mut jwt_verifier = MockTestJwtVerifier::new();
@@ -77,10 +77,7 @@ mock! {
 
     #[async_trait::async_trait]
     impl JwtVerifier for TestJwtVerifier {
-        fn jwks_uri(&self) -> &str;
-
         async fn verify(&self, raw_token: &str) -> Result<Box<dyn ClaimsExtractor>, JwtVerificationError>;
-
     }
 }
 
@@ -88,7 +85,7 @@ mock! {
     pub JWT {}
 
     impl ClaimsExtractor for JWT {
-        fn extract(self: Box<Self>) -> Claims;
+        fn extract(self: Box<Self>) -> Result<Claims, JwtVerificationError>;
     }
 }
 
@@ -109,6 +106,8 @@ async fn given_a_create_organization_request_with_an_invalid_id_when_sent_then_i
                         "id": "123",
                         "name": "Test",
                         "display_name": "Test",
+                        "description": "Test",
+                        "is_enabled": true,
                         "attributes": {},
                         "domain": null
                     }
@@ -150,6 +149,8 @@ async fn given_a_valid_create_organization_request_when_processed_then_it_should
                         "id": "{created_id}",
                         "name": "Test",
                         "display_name": "Test",
+                        "description": "test",
+                        "is_enabled": true,
                         "attributes": {{}},
                         "domain": null
                     }}
@@ -180,15 +181,20 @@ async fn given_a_create_organization_request_when_sent_then_it_should_succeed() 
         access_token,
     } = load_env_and_extract_access_token().await;
 
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = Uuid::now_v7().to_string();
 
     let body = format!(
         r###"
         {{
             "id": "{uuid}",
-            "name": "Test",
-            "display_name": "Test",
-            "attributes": {{}},
+            "name": "test-2",
+            "display_name": "Test 2",
+            "description": "test",
+            "is_enabled": true,
+            "attributes": {{
+                "custom-value1": ["value1"],
+                "custom-value2": ["value2"]
+            }},
             "domain": null
         }}
         "###

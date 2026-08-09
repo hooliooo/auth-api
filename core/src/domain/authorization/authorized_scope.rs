@@ -4,7 +4,7 @@ use crate::domain::authorization::AuthUserId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuthorizedScope {
-    RealmAdmin,
+    SuperAdmin,
     OrganizationAdmin,
     User,
 }

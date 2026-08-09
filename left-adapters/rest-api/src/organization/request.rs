@@ -8,5 +8,7 @@ pub struct CreateOrganizationRequest {
     pub id: String,
     pub name: String,
     pub display_name: String,
+    pub description: String,
+    pub is_enabled: bool,
     pub attributes: HashMap<String, Vec<String>>,
 }

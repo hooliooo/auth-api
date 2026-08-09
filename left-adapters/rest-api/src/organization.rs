@@ -22,7 +22,7 @@ use tracing::debug;
 
 use crate::{
     AppState,
-    authorization::jwt::{Claims, JwtVerifier, JwtVerifierState},
+    authorization::jwt::{Authenticated, JwtVerifier, JwtVerifierState},
     organization::request::CreateOrganizationRequest,
 };
 
@@ -82,7 +82,7 @@ impl FromRef<AppState> for CreateOrganizationState {
     )
 )]
 pub async fn create(
-    claims: Claims,
+    Authenticated(claims): Authenticated,
     host: Option<TypedHeader<Host>>,
     State(state): State<CreateOrganizationState>,
     Json(body): Json<CreateOrganizationRequest>,
@@ -91,6 +91,8 @@ pub async fn create(
         body.id,
         body.name,
         body.display_name,
+        body.description,
+        body.is_enabled,
         body.attributes,
         AuthorizedParty::new(claims.client_id),
         claims.user_id,

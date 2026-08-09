@@ -12,17 +12,20 @@ pub async fn get_server_address() -> SocketAddr {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("Cannot bind");
             let addr = listener.local_addr().unwrap();
 
+            let oauth2_url = "http://keycloak-auth-layer:8080/realms/test".to_string();
+            let database_url =
+                "postgres://auth_layer_admin:test@localhost:5433/auth_layer".to_string();
+            let audience = "authentication.layer.api".to_string();
+
             tokio::spawn(async move {
-                rest_api::run(listener).await.unwrap();
+                rest_api::run(listener, &oauth2_url, &database_url, &audience)
+                    .await
+                    .unwrap();
             });
 
             addr
         })
         .await
-}
-
-pub fn setup_env_vars() {
-    dotenvy::from_filename("tests/.env").ok();
 }
 
 pub struct TestEnv {
@@ -31,18 +34,17 @@ pub struct TestEnv {
 }
 
 pub async fn load_env_and_extract_access_token() -> TestEnv {
-    setup_env_vars();
-    let base_url = std::env::var("OAUTH2_BASE_URL").expect("OAUTH2_BASE_URL should be set");
-    let token_url = format!("{}/protocol/openid-connect/token", base_url);
-    let client_id = std::env::var("OAUTH2_CLIENT_ID").expect("No client id");
-    let client_secret = std::env::var("OAUTH2_CLIENT_SECRET").expect("No client secret");
+    let oauth2_url = "http://keycloak-auth-layer:8080/realms/test".to_string();
+    let token_url = format!("{}/protocol/openid-connect/token", oauth2_url);
+    let client_id = "end.to.end.client";
+    let client_secret = "end.to.end.client.secret";
     let address = get_server_address().await;
 
     let params = {
         let mut params = HashMap::new();
         params.insert("grant_type", "client_credentials");
-        params.insert("client_id", &client_id);
-        params.insert("client_secret", &client_secret);
+        params.insert("client_id", client_id);
+        params.insert("client_secret", client_secret);
         params
     };
 

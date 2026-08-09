@@ -9,7 +9,9 @@ async-trait.workspace = true
 auth-core = { path = "../../core" }
 chrono.workspace = true
 kern.workspace = true
+serde.workspace = true
 sqlx.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

@@ -57,9 +57,14 @@ pub struct Organization<State> {
         ),
         custom(function = "validate_whitespace")
     )]
-    #[field]
     /// The human-readable name of the Organization
+    #[field]
     display_name: String,
+    /// The description of the Organization
+    #[field]
+    description: String,
+    #[field(copy)]
+    is_enabled: bool,
     /// Custom key-value pairs that are specific to this Organization
     #[field]
     attributes: HashMap<String, HashSet<String>>,
@@ -74,6 +79,8 @@ impl<State> Organization<State> {
     /// * `id`           - The id of the Organization
     /// * `name`         - The unique name of the Organization
     /// * `display_name` - The human-readable name of the Organization
+    /// * `description`  - The description of the Organization
+    /// * `is_enabled`   - Flag indicating if the Organization is enabled or not
     /// * `attributes`   - The attributes of the Organization
     /// * `version`      - The version of the Organization
     /// # Return
@@ -82,6 +89,8 @@ impl<State> Organization<State> {
         id: Uuid,
         name: String,
         display_name: String,
+        description: String,
+        is_enabled: bool,
         attributes: HashMap<String, HashSet<String>>,
         version: u32,
     ) -> Result<Self, DomainError> {
@@ -89,6 +98,8 @@ impl<State> Organization<State> {
             id: OrganizationId::new(id),
             name,
             display_name,
+            description,
+            is_enabled,
             attributes,
             version,
             _marker: PhantomData,
@@ -108,17 +119,28 @@ impl Organization<Create> {
         id: Uuid,
         name: String,
         display_name: String,
+        description: String,
+        is_enabled: bool,
         attributes: HashMap<String, HashSet<String>>,
         version: u32,
     ) -> Result<(Self, CreatedOrganization), DomainError> {
-        let aggregate =
-            Organization::<Create>::try_new(id, name, display_name, attributes, version)?;
+        let aggregate = Organization::<Create>::try_new(
+            id,
+            name,
+            display_name,
+            description,
+            is_enabled,
+            attributes,
+            version,
+        )?;
 
         let event = CreatedOrganization::new(
             *aggregate.id(),
             aggregate.version,
             aggregate.name.clone(),
             aggregate.display_name.clone(),
+            aggregate.description.clone(),
+            aggregate.is_enabled,
             aggregate.attributes().clone(),
             Utc::now(),
         );
@@ -154,6 +176,8 @@ mod tests {
                 Uuid::new_v4(),
                 "x".repeat(101),
                 "Some Display Name".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );
@@ -178,6 +202,8 @@ mod tests {
                 Uuid::new_v4(),
                 "   ".to_string(),
                 "Some Display Name".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );
@@ -202,6 +228,8 @@ mod tests {
                 Uuid::new_v4(),
                 "  a".to_string(),
                 "Some Display Name".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );
@@ -223,6 +251,8 @@ mod tests {
                 Uuid::new_v4(),
                 "a   ".to_string(),
                 "Some Display Name".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );
@@ -248,6 +278,8 @@ mod tests {
                 Uuid::new_v4(),
                 "organization_a".to_string(),
                 "Some Display Name".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );
@@ -270,6 +302,8 @@ mod tests {
                 Uuid::new_v4(),
                 "organization-a".to_string(),
                 "x".repeat(101),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );
@@ -294,6 +328,8 @@ mod tests {
                 Uuid::new_v4(),
                 "organization-a".to_string(),
                 "   ".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );
@@ -319,6 +355,8 @@ mod tests {
                 Uuid::new_v4(),
                 "organization-a".to_string(),
                 "  a".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );
@@ -340,6 +378,8 @@ mod tests {
                 Uuid::new_v4(),
                 "organization-a".to_string(),
                 "a   ".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );
@@ -364,6 +404,8 @@ mod tests {
                 Uuid::new_v4(),
                 "organization-a".to_string(),
                 "Organization A".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
                 0,
             );

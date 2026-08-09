@@ -31,7 +31,7 @@ impl AuthorizationService for AuthAPIAuthorizationService {
         >,
     ) -> Result<(), ForbiddenError> {
         match request.authorized_scope() {
-            AuthorizedScope::RealmAdmin => Ok(()),
+            AuthorizedScope::SuperAdmin => Ok(()),
             AuthorizedScope::OrganizationAdmin | AuthorizedScope::User => {
                 Err(ForbiddenError::new(NOT_A_REALM_ADMIN))
             }

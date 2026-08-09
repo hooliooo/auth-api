@@ -7,12 +7,12 @@ edition = "2024"
 e2e = []
 
 [dependencies]
+authentication = { path = "../../authentication" }
 async-trait.workspace = true
 auth-core = { path = "../../core" }
 axum.workspace = true
 axum-extra.workspace = true
 chrono.workspace = true
-dotenvy.workspace = true
 jsonwebtoken.workspace = true
 kern.workspace = true
 reqwest.workspace = true

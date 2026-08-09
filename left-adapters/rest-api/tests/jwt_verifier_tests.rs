@@ -11,15 +11,16 @@ pub mod common;
 async fn test_jwt_verifier() {
     use auth_core::domain::authorization::authorized_scope::AuthorizedScope;
 
-    let url = "http://keycloak-auth-layer:8080/realms/test/.well-known/openid-configuration";
+    let issuer_url = "http://keycloak-auth-layer:8080/realms/test";
     let client = Client::new();
     let verifier = KeycloakJwtVerifier::new(
-        url.to_string(),
+        issuer_url,
         client,
         "authentication.layer.api".to_string(),
         false,
     )
-    .await;
+    .await
+    .unwrap();
 
     let params = {
         let mut params = HashMap::new();
@@ -49,6 +50,6 @@ async fn test_jwt_verifier() {
         .to_owned();
 
     let token = verifier.verify(&access_token).await.unwrap();
-    let claims = token.extract();
-    assert_eq!(claims.authorized_scope, AuthorizedScope::RealmAdmin);
+    let claims = token.extract().unwrap();
+    assert_eq!(claims.authorized_scope, AuthorizedScope::SuperAdmin);
 }

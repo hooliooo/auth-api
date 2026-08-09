@@ -29,15 +29,15 @@ use crate::{
 pub mod authorization;
 pub mod organization;
 
-pub async fn create_router() -> Router {
-    let state = create_app_state().await;
+pub async fn setup(oauth2_url: &str, database_url: &str, audience: &str) -> Router {
+    let state = create_app_state(oauth2_url, database_url, audience).await;
     // Create Routers
     let organization_router =
         organization::router::create_organization_router(state.organization.create.clone());
-    let health_router = Router::new().route("/", get(health));
+    let health_router = create_health_router();
 
     Router::new()
-        .nest("/health", health_router)
+        .merge(health_router)
         .nest("/organizations", organization_router)
         .layer(
             TraceLayer::new_for_http()
@@ -63,11 +63,12 @@ pub async fn create_router() -> Router {
 
                     tracing::debug!("Headers: {:?}", request.headers());
                 })
-                .on_response(|_response: &Response, _latency: Duration, _span: &Span| {
-                    // ...
+                .on_response(|response: &Response, latency: Duration, _span: &Span| {
+                    // Fires once the headers are ready, so the body has not streamed yet.
+                    tracing::debug!(status = %response.status(), ?latency, "Response");
                 })
-                .on_body_chunk(|_chunk: &Bytes, _latency: Duration, _span: &Span| {
-                    // ...
+                .on_body_chunk(|chunk: &Bytes, _latency: Duration, _span: &Span| {
+                    tracing::debug!(body = %String::from_utf8_lossy(chunk), "Response body");
                 })
                 .on_eos(
                     |_trailers: Option<&HeaderMap>, _stream_duration: Duration, _span: &Span| {
@@ -82,7 +83,12 @@ pub async fn create_router() -> Router {
         )
 }
 
-pub async fn run(listener: TcpListener) -> Result<(), std::io::Error> {
+pub async fn run(
+    listener: TcpListener,
+    oauth2_url: &str,
+    database_url: &str,
+    audience: &str,
+) -> Result<(), std::io::Error> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -97,7 +103,7 @@ pub async fn run(listener: TcpListener) -> Result<(), std::io::Error> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
-    let app = create_router().await;
+    let app = setup(oauth2_url, database_url, audience).await;
     let address = listener.local_addr().unwrap();
     tracing::debug!("listening on {}", address);
     axum::serve(listener, app).await
@@ -114,22 +120,13 @@ pub struct AppState {
 
 /// Create the AppState for the application
 /// Configure all dependencies and settle all configuration
-async fn create_app_state() -> AppState {
-    // Load the environment variables
-    dotenvy::dotenv().unwrap();
-    let keycloak_url = env::var("OAUTH2_BASE_URL").unwrap();
-    let audience = env::var("AUDIENCE").unwrap();
-    let database_url = env::var("DATABASE_URL").unwrap();
-
+async fn create_app_state(oauth2_url: &str, database_url: &str, audience: &str) -> AppState {
     // Create the JWTVerifier
     let client = reqwest::Client::new();
-    let keycloak_jwt_verifier = KeycloakJwtVerifier::new(
-        format!("{}/.well-known/openid-configuration", keycloak_url),
-        client,
-        audience,
-        true,
-    )
-    .await;
+    let keycloak_jwt_verifier =
+        KeycloakJwtVerifier::new(oauth2_url, client, audience.to_string(), true)
+            .await
+            .expect("Failed to read the Keycloak well-known configuration");
     let verifier = Arc::new(keycloak_jwt_verifier);
 
     let authorization_service = Arc::new(AuthAPIAuthorizationService);
@@ -138,7 +135,7 @@ async fn create_app_state() -> AppState {
     let event_emitter = Arc::new(TokioEventBus::new());
 
     // DatabaseState
-    let database_state = database_setup(&database_url).await.unwrap();
+    let database_state = database_setup(database_url).await.unwrap();
 
     // Create OrganizationState
     let organization_state = create_organization_state(
@@ -152,4 +149,8 @@ async fn create_app_state() -> AppState {
     AppState {
         organization: organization_state,
     }
+}
+
+pub fn create_health_router() -> Router {
+    Router::new().route("/health", get(health))
 }
