@@ -5,7 +5,6 @@ use validator::ValidationError;
 
 use crate::domain::organization::OrganizationId;
 
-pub mod authorization;
 pub mod exception;
 pub mod organization;
 pub mod state;

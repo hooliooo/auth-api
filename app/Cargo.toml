@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 auth-core = { path = "../core" }
-rest-api = { path = "../left-adapters/rest-api" }
+# Its default `e2e` feature only selects its own tests, so it is not forwarded from here
+rest-api = { path = "../adapters/inbound/rest-api", default-features = false }
 
 tokio.workspace = true
+tracing.workspace = true

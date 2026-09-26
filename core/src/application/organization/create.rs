@@ -2,19 +2,19 @@ use kern::{
     application::{
         error::forbidden_error::ForbiddenError, event::EventPublisher, use_case::UseCase,
     },
+    building_blocks::domain_event::DomainEvent,
     building_blocks::entity::Entity,
     building_blocks::error::domain_error::DomainError,
 };
 
 use crate::{
-    application::organization::commands::CreateOrganization,
+    application::{
+        authorization::{AuthorizationService, AuthorizedRequest},
+        organization::commands::CreateOrganization,
+    },
     domain::{
-        authorization::AuthorizationService,
         exception::RepositoryWriteError,
-        organization::{
-            Organization, OrganizationId, events::CREATED_ORGANIZATION,
-            repository::OrganizationWriteRepository,
-        },
+        organization::{Organization, OrganizationId, repository::OrganizationWriteRepository},
     },
 };
 use std::sync::Arc;
@@ -43,30 +43,39 @@ impl CreateOrganizationUseCase {
 
 #[async_trait::async_trait]
 impl UseCase for CreateOrganizationUseCase {
-    type Request = CreateOrganization;
+    type Request = AuthorizedRequest<CreateOrganization>;
     type Response = Result<OrganizationId, CreateOrganizationError>;
 
-    async fn handle(&self, request: CreateOrganization) -> Self::Response {
+    async fn handle(&self, request: AuthorizedRequest<CreateOrganization>) -> Self::Response {
+        let (context, command) = request.into_parts();
         self.authorization_service
-            .require_realm_admin(&request)
+            .require_realm_admin(&context)
             .map_err(CreateOrganizationError::Forbidden)?;
 
+        let (aggregate_id, name, display_name, description, is_enabled, attributes) =
+            command.into_parts();
+
         let (organization, event) = Organization::create(
-            request.aggregate_id().value(),
-            request.name().to_owned(),
-            request.display_name().to_owned(),
-            request.attributes().clone(),
+            aggregate_id,
+            name,
+            display_name,
+            description,
+            is_enabled,
+            attributes,
             0,
         )
         .map_err(CreateOrganizationError::Invariant)?;
 
+        // The event is handed to the repository so it lands in the outbox inside the same
+        // transaction as the aggregate. The publish below stays for in-process subscribers;
+        // the outbox row is what makes delivery survive a crash here.
         self.repository
-            .create(&organization)
+            .create(&organization, &event)
             .await
             .map_err(CreateOrganizationError::Database)?;
 
-        self.event_publisher
-            .publish(CREATED_ORGANIZATION, Arc::new(event));
+        let event_type = event.event_type();
+        self.event_publisher.publish(event_type, Arc::new(event));
         Ok(*organization.id())
     }
 }
@@ -86,18 +95,16 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
     use uuid::Uuid;
 
-    use crate::domain::authorization::authorized_scope::AuthorizedScope;
     use crate::{
         application::{
             MockTestEventPublisher,
-            organization::{
-                command_factory::OrganizationCommandFactory, create::CreateOrganizationUseCase,
+            authorization::{
+                AuthorizedRequest, AuthzContext, MockAuthorizationService,
+                authorized_scope::AuthorizedScope,
             },
+            organization::{commands::CreateOrganization, create::CreateOrganizationUseCase},
         },
-        domain::{
-            authorization::MockAuthorizationService,
-            organization::repository::MockOrganizationWriteRepository,
-        },
+        domain::organization::repository::MockOrganizationWriteRepository,
     };
 
     #[tokio::test]
@@ -115,7 +122,7 @@ mod tests {
             .expect_create()
             .times(1)
             .in_sequence(&mut sequence)
-            .returning(|_| Result::Ok(()));
+            .returning(|_, _| Result::Ok(()));
 
         let mut event_emitter = MockTestEventPublisher::new();
         event_emitter
@@ -130,23 +137,25 @@ mod tests {
             Arc::new(event_emitter),
         );
 
-        let command_factory = OrganizationCommandFactory::new(
-            kern::application::environment::Environment::Development,
-        );
-
-        let authorized_scope = AuthorizedScope::RealmAdmin;
-        let command = command_factory
-            .create(
-                Uuid::new_v4().to_string(),
+        let authorized_scope = AuthorizedScope::SuperAdmin;
+        let request: AuthorizedRequest<CreateOrganization> = AuthorizedRequest::new(
+            AuthzContext::new(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                AuthorizedParty::new("test.client".to_string()),
+                authorized_scope,
+            ),
+            CreateOrganization::new(
+                Uuid::now_v7(),
                 "organization-a".to_string(),
                 "Organization A".to_string(),
+                "Some description".to_string(),
+                true,
                 HashMap::default(),
-                AuthorizedParty::new("test.client".to_string()),
-                Uuid::new_v4().to_string(),
-                authorized_scope,
-            )
-            .unwrap();
-        let created_id = use_case.handle(command.clone()).await.unwrap();
-        assert_eq!(command.aggregate_id().value(), created_id.value());
+            ),
+        );
+        let aggregate_id = *request.payload().aggregate_id();
+        let created_id = use_case.handle(request).await.unwrap();
+        assert_eq!(aggregate_id, created_id);
     }
 }

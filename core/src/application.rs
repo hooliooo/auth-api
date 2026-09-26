@@ -3,6 +3,8 @@ use kern::building_blocks::domain_event::DynDomainEvent;
 #[cfg(test)]
 use mockall::mock;
 
+pub mod authentication;
+pub mod authorization;
 pub mod organization;
 
 #[cfg(test)]

@@ -8,13 +8,24 @@ use crate::domain::organization::OrganizationId;
 
 #[derive(DomainEvent)]
 pub struct CreatedOrganization {
+    #[field]
     id: EventId,
+    #[field]
     aggregate_id: OrganizationId,
+    #[field]
     aggregate_version: u32,
+    #[field]
     name: String,
+    #[field]
     display_name: String,
+    #[field]
+    description: String,
+    #[field(copy)]
+    is_enabled: bool,
+    #[field]
     attributes: HashMap<String, HashSet<String>>,
-    occurred_at: DateTime<Utc>,
+    #[field]
+    occurred_on: DateTime<Utc>,
 }
 
 impl CreatedOrganization {
@@ -24,35 +35,21 @@ impl CreatedOrganization {
         aggregate_version: u32,
         name: String,
         display_name: String,
+        description: String,
+        is_enabled: bool,
         attributes: HashMap<String, HashSet<String>>,
-        occurred_at: DateTime<Utc>,
+        occurred_on: DateTime<Utc>,
     ) -> Self {
         Self {
-            id: EventId::new(Uuid::new_v4()),
+            id: EventId::new(Uuid::now_v7()),
             aggregate_id,
             aggregate_version,
             name,
             display_name,
+            description,
+            is_enabled,
             attributes,
-            occurred_at,
+            occurred_on,
         }
     }
-
-    pub fn aggregate_id(&self) -> &OrganizationId {
-        &self.aggregate_id
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn display_name(&self) -> &str {
-        &self.display_name
-    }
-
-    pub fn attributes(&self) -> &HashMap<String, HashSet<String>> {
-        &self.attributes
-    }
 }
-
-pub const CREATED_ORGANIZATION: &str = "created-organization";

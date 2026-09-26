@@ -1,4 +1,4 @@
-FROM quay.io/keycloak/keycloak:26.5.5 AS builder
+FROM quay.io/keycloak/keycloak:26.7.0 AS builder
 
 ENV KC_HEALTH_ENABLED=true
 ENV KC_METRICS_ENABLED=false
@@ -11,7 +11,7 @@ RUN /opt/keycloak/bin/kc.sh build
 RUN /opt/keycloak/bin/kc.sh show-config
 
 ## Runtime env
-FROM quay.io/keycloak/keycloak:26.5.5
+FROM quay.io/keycloak/keycloak:26.7.0
 # Copy optimzed image data and custom artifacts
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
 
