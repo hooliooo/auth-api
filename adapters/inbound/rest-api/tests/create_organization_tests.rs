@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use auth_core::application::authentication::{
-    Claims, ClaimsExtractor, JwtVerificationError, JwtVerifier,
-};
+use auth_core::application::authentication::{Claims, JwtVerificationError, JwtVerifier};
 use auth_core::{
     application::{
         authorization::{AuthorizedRequest, authorized_scope::AuthorizedScope},
@@ -32,6 +30,7 @@ use serde_json::from_slice;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[cfg(feature = "e2e")]
 use crate::common::{TEST_HTTP_CLIENT, TestEnv, load_env_and_extract_access_token};
 
 mod common;
@@ -45,8 +44,9 @@ fn setup_state_returning(
 ) -> Router {
     let mut use_case = MockTestCreateOrganizationUseCase::new();
     use_case.expect_handle().returning(move |_req| result());
-    let mut jwt = MockJWT::new();
-    jwt.expect_extract().returning(|| {
+
+    let mut jwt_verifier = MockTestJwtVerifier::new();
+    jwt_verifier.expect_verify().return_once(|_req| {
         let authorized_scope = AuthorizedScope::SuperAdmin;
         Ok(Claims {
             client_id: Uuid::new_v4().to_string(),
@@ -54,11 +54,6 @@ fn setup_state_returning(
             authorized_scope,
         })
     });
-
-    let mut jwt_verifier = MockTestJwtVerifier::new();
-    jwt_verifier
-        .expect_verify()
-        .return_once(|_req| Ok(Box::new(jwt)));
 
     let organization = OrganizationState {
         create: CreateOrganizationState {
@@ -86,15 +81,7 @@ mock! {
 
     #[async_trait::async_trait]
     impl JwtVerifier for TestJwtVerifier {
-        async fn verify(&self, raw_token: &str) -> Result<Box<dyn ClaimsExtractor>, JwtVerificationError>;
-    }
-}
-
-mock! {
-    pub JWT {}
-
-    impl ClaimsExtractor for JWT {
-        fn extract(self: Box<Self>) -> Result<Claims, JwtVerificationError>;
+        async fn verify(&self, raw_token: &str) -> Result<Claims, JwtVerificationError>;
     }
 }
 

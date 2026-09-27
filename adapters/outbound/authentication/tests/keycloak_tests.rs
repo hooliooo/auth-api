@@ -16,7 +16,6 @@ async fn test_jwt_verifier() {
         issuer_url,
         client.clone(),
         "authentication.layer.api".to_string(),
-        false,
     )
     .await
     .unwrap();
@@ -44,7 +43,6 @@ async fn test_jwt_verifier() {
         .unwrap()
         .to_owned();
 
-    let token = verifier.verify(&access_token).await.unwrap();
-    let claims = token.extract().unwrap();
+    let claims = verifier.verify(&access_token).await.unwrap();
     assert_eq!(claims.authorized_scope, AuthorizedScope::SuperAdmin);
 }

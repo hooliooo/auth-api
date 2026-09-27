@@ -116,10 +116,9 @@ async fn build_state(oauth2_url: &str, database_url: &str, audience: &str) -> Ap
         .timeout(Duration::from_secs(5))
         .build()
         .expect("Failed to build the HTTP client");
-    let keycloak_jwt_verifier =
-        KeycloakJwtVerifier::new(oauth2_url, client, audience.to_string(), true)
-            .await
-            .expect("Failed to read the Keycloak well-known configuration");
+    let keycloak_jwt_verifier = KeycloakJwtVerifier::new(oauth2_url, client, audience.to_string())
+        .await
+        .expect("Failed to read the Keycloak well-known configuration");
     let verifier = Arc::new(keycloak_jwt_verifier);
 
     let authorization_service = Arc::new(AuthAPIAuthorizationService);

@@ -97,9 +97,7 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use auth_core::application::authentication::{
-        Claims, ClaimsExtractor, JwtVerificationError, JwtVerifier,
-    };
+    use auth_core::application::authentication::{Claims, JwtVerificationError, JwtVerifier};
     use auth_core::application::authorization::authorized_scope::AuthorizedScope;
     use axum::{
         Router,
@@ -144,25 +142,14 @@ mod tests {
 
     struct AcceptAll;
 
-    struct SuperAdmin;
-
-    impl ClaimsExtractor for SuperAdmin {
-        fn extract(self: Box<Self>) -> Result<Claims, JwtVerificationError> {
+    #[async_trait::async_trait]
+    impl JwtVerifier for AcceptAll {
+        async fn verify(&self, _raw_token: &str) -> Result<Claims, JwtVerificationError> {
             Ok(Claims {
                 client_id: "test.client".to_string(),
                 user_id: Uuid::now_v7().to_string(),
                 authorized_scope: AuthorizedScope::SuperAdmin,
             })
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl JwtVerifier for AcceptAll {
-        async fn verify(
-            &self,
-            _raw_token: &str,
-        ) -> Result<Box<dyn ClaimsExtractor>, JwtVerificationError> {
-            Ok(Box::new(SuperAdmin))
         }
     }
 

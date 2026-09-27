@@ -3,13 +3,12 @@ name = "rest-api"
 version = "0.1.0"
 edition = "2024"
 
+# Tests against the docker/ stack only run with `--features e2e`
 [features]
-default = ["e2e"]
 e2e = []
 
 [dependencies]
-# Its default `e2e` feature only selects its own tests, so it is not forwarded from here
-authentication = { path = "../../outbound/authentication", default-features = false }
+authentication = { path = "../../outbound/authentication" }
 async-trait.workspace = true
 auth-core = { path = "../../../core" }
 axum.workspace = true

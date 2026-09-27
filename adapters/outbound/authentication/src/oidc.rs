@@ -1,52 +1,100 @@
-use std::marker::PhantomData;
+//! Verification shared by every OpenID Connect provider: discovery, signature checks against
+//! the provider's JWKS, and the audience, issuer and expiry validations.
 
-use auth_core::application::authentication::{ClaimsExtractor, JwtVerificationError, JwtVerifier};
-use jsonwebtoken::{DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
+use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
+
+use auth_core::application::authentication::{Claims, JwtVerificationError, JwtVerifier};
+use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
 use serde::Deserialize;
 use serde_json::Value;
+use thiserror::Error;
+
+use crate::cache::{Cache, HttpJwksSource, SourceError};
 
 /// The path OIDC Discovery 1.0 mandates for the document, relative to the issuer.
 const DISCOVERY_PATH: &str = ".well-known/openid-configuration";
 
-/// How a provider's claims type is built from a verified token's payload.
+/// How long fetched signing keys are trusted before they are refreshed.
+const KEY_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// The minimum time between two refetch attempts.
+const KEY_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The asymmetric algorithms a signing key may use. Which one applies to a token is decided
+/// by the key that signed it, never by the token's own header.
+///
+/// A policy rather than configuration: discovery documents only describe ID tokens, and list
+/// every algorithm a provider implements, symmetric ones included. ES512 is absent because
+/// jsonwebtoken does not support P-521 keys.
+const ALGORITHMS: [Algorithm; 9] = [
+    Algorithm::RS256,
+    Algorithm::RS384,
+    Algorithm::RS512,
+    Algorithm::PS256,
+    Algorithm::PS384,
+    Algorithm::PS512,
+    Algorithm::ES256,
+    Algorithm::ES384,
+    Algorithm::EdDSA,
+];
+
+/// How a provider's token payload is read into the [`Claims`] this service acts on.
 ///
 /// This is the only thing that differs between providers, so it is what
 /// [`OidcJwtVerifier`] is parameterised by.
-pub trait ProviderClaims: ClaimsExtractor + 'static {
-    fn from_payload(payload: Value) -> Self;
+pub trait ProviderClaims {
+    fn claims(payload: Value) -> Result<Claims, JwtVerificationError>;
 }
 
 /// Verifies tokens against an OpenID Connect provider: signature via the provider's JWKS, plus
 /// audience, issuer and expiry.
 ///
 /// All of that is defined by OIDC, so it is identical for every compliant provider — `C`
-/// supplies the only provider-specific part, reading the payload into
-/// [`Claims`](auth_core::application::authentication::Claims).
-#[derive(Clone, Debug)]
+/// supplies the only provider-specific part, reading the payload into [`Claims`].
 pub struct OidcJwtVerifier<C> {
     well_known_endpoint: WellKnownEndpoint,
-    client: reqwest::Client,
-    audience: String,
-    validate_expiration: bool,
+    keys: Arc<Cache>,
+    /// One per algorithm, built once: the audience and issuer never change after startup.
+    validations: HashMap<Algorithm, Validation>,
     _marker: PhantomData<fn() -> C>,
 }
 
 impl<C> OidcJwtVerifier<C> {
     /// `issuer_url` is the provider's base URL, e.g.
-    /// `https://keycloak.example.com/realms/some-realm`.
+    /// `https://keycloak.example.com/realms/some-realm`. Reads the discovery document and the
+    /// signing keys, so it fails if the provider cannot be reached.
     pub async fn new(
         issuer_url: &str,
         client: reqwest::Client,
         audience: String,
-        validate_expiration: bool,
-    ) -> Result<Self, WellKnownEndpointError> {
+    ) -> Result<Self, OidcSetupError> {
         let well_known_endpoint = WellKnownEndpoint::fetch(&client, issuer_url).await?;
 
+        // OIDC Discovery 1.0 §4.3: the document must name the issuer it was fetched for,
+        // otherwise the endpoint, not this configuration, decides which tokens are accepted.
+        if well_known_endpoint.issuer.trim_end_matches('/') != issuer_url.trim_end_matches('/') {
+            return Err(OidcSetupError::IssuerMismatch {
+                expected: issuer_url.to_owned(),
+                found: well_known_endpoint.issuer,
+            });
+        }
+
+        let source = HttpJwksSource::new(client, well_known_endpoint.jwks_uri.clone());
+        let keys = Cache::new(source, KEY_TTL, KEY_MIN_REFRESH_INTERVAL).await?;
+
+        let validations = ALGORITHMS
+            .into_iter()
+            .map(|algorithm| {
+                let mut validation = Validation::new(algorithm);
+                validation.set_audience(&[audience.as_str()]);
+                validation.set_issuer(&[well_known_endpoint.issuer.as_str()]);
+                (algorithm, validation)
+            })
+            .collect();
         Ok(Self {
             well_known_endpoint,
-            client,
-            audience,
-            validate_expiration,
+            keys: Arc::new(keys),
+            validations,
             _marker: PhantomData,
         })
     }
@@ -55,14 +103,10 @@ impl<C> OidcJwtVerifier<C> {
         &self.well_known_endpoint.token_endpoint
     }
 
-    fn jwks_uri(&self) -> &str {
-        &self.well_known_endpoint.jwks_uri
-    }
-
     /// Verifies `raw_token` and returns its payload untouched.
     ///
-    /// Only an unreachable JWKS is the provider's fault; every other failure means the token
-    /// cannot be trusted, so it is reported as invalid with the specific reason.
+    /// Only an unreachable provider is not the token's fault; every other failure means the
+    /// token cannot be trusted, so it is reported as invalid with the specific reason.
     async fn verify_payload(&self, raw_token: &str) -> Result<Value, JwtVerificationError> {
         let header = decode_header(raw_token)
             .map_err(|_| JwtVerificationError::Invalid("malformed token header".to_string()))?;
@@ -72,33 +116,18 @@ impl<C> OidcJwtVerifier<C> {
             .kid
             .ok_or_else(|| JwtVerificationError::Invalid("token has no key id".to_string()))?;
 
-        let jwk_set: JwkSet = self
-            .client
-            .get(self.jwks_uri())
-            .send()
-            .await
-            .map_err(|error| JwtVerificationError::ProviderUnavailable(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| JwtVerificationError::ProviderUnavailable(error.to_string()))?;
-
-        let jwk = jwk_set.find(&kid).ok_or_else(|| {
-            JwtVerificationError::Invalid(format!("no signing key with id '{kid}'"))
+        let key = self.keys.key(&kid).await?;
+        if header.alg != key.algorithm {
+            return Err(JwtVerificationError::Invalid(format!(
+                "key '{kid}' signs with {:?}, not {:?}",
+                key.algorithm, header.alg
+            )));
+        }
+        let validation = self.validations.get(&key.algorithm).ok_or_else(|| {
+            JwtVerificationError::Invalid(format!("unsupported algorithm {:?}", header.alg))
         })?;
 
-        let decoding_key = DecodingKey::from_jwk(jwk).map_err(|_| {
-            JwtVerificationError::Invalid(format!("signing key '{kid}' is unusable"))
-        })?;
-
-        let validation = {
-            let mut validation = Validation::new(header.alg);
-            validation.set_audience(&[self.audience.as_str()]);
-            validation.set_issuer(&[self.well_known_endpoint.issuer.as_str()]);
-            validation.validate_exp = self.validate_expiration;
-            validation
-        };
-
-        decode::<Value>(raw_token, &decoding_key, &validation)
+        decode::<Value>(raw_token, &key.key, validation)
             .map(|token| token.claims)
             .map_err(|error| JwtVerificationError::Invalid(format!("{:?}", error.into_kind())))
     }
@@ -106,12 +135,9 @@ impl<C> OidcJwtVerifier<C> {
 
 #[async_trait::async_trait]
 impl<C: ProviderClaims> JwtVerifier for OidcJwtVerifier<C> {
-    async fn verify(
-        &self,
-        raw_token: &str,
-    ) -> Result<Box<dyn ClaimsExtractor>, JwtVerificationError> {
+    async fn verify(&self, raw_token: &str) -> Result<Claims, JwtVerificationError> {
         let payload = self.verify_payload(raw_token).await?;
-        Ok(Box::new(C::from_payload(payload)))
+        C::claims(payload)
     }
 }
 
@@ -147,27 +173,23 @@ impl WellKnownEndpoint {
 }
 
 /// A failure reading the discovery document at startup.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum WellKnownEndpointError {
+    #[error("Could not reach the well-known endpoint: {0}")]
     Unreachable(reqwest::Error),
+    #[error("The well-known endpoint returned an error: {0}")]
     ErrorStatus(reqwest::Error),
+    #[error("The well-known endpoint is not valid JSON: {0}")]
     Malformed(reqwest::Error),
 }
 
-impl std::fmt::Display for WellKnownEndpointError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unreachable(error) => {
-                write!(f, "Could not reach the well-known endpoint: {}", error)
-            }
-            Self::ErrorStatus(error) => {
-                write!(f, "The well-known endpoint returned an error: {}", error)
-            }
-            Self::Malformed(error) => {
-                write!(f, "The well-known endpoint is not valid JSON: {}", error)
-            }
-        }
-    }
+/// A failure setting up the verifier during startup.
+#[derive(Debug, Error)]
+pub enum OidcSetupError {
+    #[error(transparent)]
+    Discovery(#[from] WellKnownEndpointError),
+    #[error("The discovery document is for issuer '{found}', not '{expected}'")]
+    IssuerMismatch { expected: String, found: String },
+    #[error("Could not load the signing keys: {0}")]
+    SigningKeys(#[from] SourceError),
 }
-
-impl std::error::Error for WellKnownEndpointError {}

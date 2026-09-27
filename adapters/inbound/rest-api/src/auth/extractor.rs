@@ -24,13 +24,12 @@ where
             .typed_get::<Authorization<Bearer>>()
             .ok_or(JwtHeaderError::MissingBearerToken)?;
 
-        let jwt = state
+        let claims = state
             .jwt_verifier()
             .verify(bearer.token())
             .await
             .map_err(JwtHeaderError::InvalidJwt)?;
 
-        let claims = jwt.extract().map_err(JwtHeaderError::InvalidJwt)?;
         tracing::debug!(client_id = %claims.client_id, "Extracted JWT claims");
         Ok(Self(claims))
     }
