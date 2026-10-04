@@ -1,0 +1,22 @@
+[package]
+name = "oidc"
+version = "0.1.0"
+edition = "2024"
+
+# Tests against the docker/ Keycloak only run with `--features e2e`
+[features]
+e2e = []
+
+[dependencies]
+async-trait.workspace = true
+jsonwebtoken.workspace = true
+kern.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

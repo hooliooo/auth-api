@@ -1,0 +1,11 @@
+[package]
+name = "jwt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+auth-core = { path = "../../../core" }
+oidc = { path = "../../../../oidc" }
+kern.workspace = true
+serde.workspace = true
+serde_json.workspace = true

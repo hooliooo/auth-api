@@ -1,0 +1,35 @@
+include:
+  - ../../iam-config/docker-compose.yml
+
+services:
+  redis:
+    image: redis:8.8-alpine
+    container_name: bff-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  bff:
+    build: 
+      context: ../..
+      dockerfile: crates/bff/Dockerfile
+    container_name: bff
+    ports:
+      - "5100:5100"
+    environment:
+      RUST_LOG: bff=debug,oidc=debug,info
+      ISSUER_URI: http://localhost:8080/realms/test
+      DISCOVERY_URI: http://keycloak-api:8080/realms/test
+      CLIENT_ID: bff
+      CLIENT_SECRET: bff.secret
+      REDIRECT_URI: http://localhost:5100/auth/callback
+      REDIS_URI: redis://redis:6379
+    depends_on: 
+      redis:
+        condition: service_healthy
+      keycloak-api:
+        condition: service_healthy
+    restart: on-failure

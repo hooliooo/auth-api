@@ -3,12 +3,15 @@ resolver = "3"
 # Hexagonal layout: `core` holds the domain, use cases and ports; inbound adapters call into
 # it, outbound adapters implement the ports it calls; `app` wires them together.
 members = [
-  "app",
-  "core",
-  "adapters/inbound/rest-api",
-  "adapters/outbound/authentication",
-  "adapters/outbound/nats-event-publisher",
-  "adapters/outbound/write-model",
+  "crates/api/app",
+  "crates/api/core",
+  "crates/api/adapters/inbound/rest-api",
+  "crates/api/adapters/outbound/jwt",
+  "crates/api/adapters/outbound/nats-event-publisher",
+  "crates/api/adapters/outbound/write-model",
+
+  "crates/bff",
+  "crates/oidc",
 ]
 
 [workspace.dependencies]
@@ -17,6 +20,7 @@ async-nats = { version = "0.50.0" }
 async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["json", "tracing"] }
 axum-extra = { version = "0.12.6", features = ["typed-header"] }
+base64 = { version = "0.23.1" }
 chrono = "0.4.45"
 ctor = "1.0.13"
 dtor = "1.0.6"
@@ -29,8 +33,10 @@ kern = { version = "0.1.0", git = "https://github.com/hooliooo/kern.git", featur
 ] }
 jsonwebtoken = { version = "11.1.0", features = ["rust_crypto"] }
 mockall = "0.15.0"
+redis = { version = "1.7.1" }
 regex = { version = "1.13.1", features = ["std", "logging"] }
 reqwest = { version = "0.13.5", features = ["json", "form"] }
+ring = { version = "0.17.14" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151" }
 # utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
@@ -40,10 +46,12 @@ sqlx = { version = "0.9.0", features = [
   "runtime-tokio",
   "uuid",
 ] }
+subtle = { version = "2.6.1" }
 # Held at 0.27 to match testcontainers-modules 0.15, which pins testcontainers ^0.27.
 testcontainers = { version = "0.27.3" }
 testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 thiserror = { version = "2.0.21" }
+time = { version = "0.3.55" }
 tokio = { version = "1.53.1", features = ["full"] }
 tower = { version = "0.5.3" }
 tower-http = { version = "0.7.1", features = ["sensitive-headers", "trace"] }
