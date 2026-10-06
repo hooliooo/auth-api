@@ -50,6 +50,7 @@ pub(crate) struct Oidc {
     pub verifier: OidcJwtVerifier<RawPayload>,
     pub public_base_url: Url,
     pub authorization_url: Url,
+    pub end_session_url: Url,
 }
 
 impl Oidc {
@@ -69,16 +70,24 @@ impl Oidc {
         let well_known = verifier.well_known_endpoint();
         let authorization_url = Url::parse(&well_known.authorization_endpoint)
             .map_err(|_| StartupError::InvalidUrl("authorization_url"))?;
+
+        let end_session_url = Url::parse(&well_known.end_session_endpoint)
+            .map_err(|_| StartupError::InvalidUrl("end_session_url"))?;
         Ok(Self {
             config,
             verifier,
             public_base_url,
             authorization_url,
+            end_session_url,
         })
     }
 
     pub fn token_endpoint(&self) -> &str {
         self.verifier.token_endpoint()
+    }
+
+    pub fn revocation_endpoint(&self) -> &str {
+        self.verifier.revocation_endpoint()
     }
 }
 

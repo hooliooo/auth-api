@@ -1,17 +1,22 @@
+use axum::Form;
 use axum::Json;
 use axum::http::header::REFERRER_POLICY;
 use axum::http::header::SET_COOKIE;
+use axum::routing::post;
 use axum::{
     Router,
     extract::{Query, State},
-    http::{HeaderMap, HeaderValue},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
 use oidc::oidc::{JwtVerificationError, JwtVerifier};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use serde_json::Map;
+use serde_json::Value;
 use thiserror::Error;
+use tracing::info;
 use tracing::warn;
 
 use crate::sealed;
@@ -28,11 +33,14 @@ use crate::{
 };
 
 const LOGIN_TTL_SECS: u64 = 300;
+const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/auth/login", get(login))
         .route("/auth/callback", get(callback))
+        .route("/auth/logout", post(logout))
+        .route("/auth/backchannel-logout", post(backchannel_logout))
         .route("/auth/session", get(current))
 }
 
@@ -44,6 +52,8 @@ pub enum LoginError {
     CookieError(String),
     #[error("Invalid authorization_endpoint: '{0}'")]
     InvalidAuthorizationEndpoint(String),
+    #[error("Invalid backchannel logout token")]
+    InvalidBackchannelLogoutToken,
     #[error("Missing code or state")]
     InvalidCallbackQuery,
     #[error("Invalid nonce")]
@@ -56,6 +66,8 @@ pub enum LoginError {
     InvalidStateParam,
     #[error(transparent)]
     JwtVerificationError(JwtVerificationError),
+    #[error("Missing sid")]
+    MissingSid,
     #[error("PkceError: {0}")]
     PkceError(PkceError),
     #[error("Could not generate random values")]
@@ -307,6 +319,95 @@ async fn exchange_code(
         .await
         .map_err(|e| LoginError::CodeExchangeError(e.to_string()))?;
     Ok(result)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogoutResponse {
+    logout_url: String,
+}
+
+async fn logout(
+    State(app_state): State<AppState>,
+    current_session: CurrentSession,
+) -> Result<Response, AppError> {
+    let mut redis = app_state.redis.clone();
+    session::delete(&mut redis, &current_session.id).await?;
+
+    if let Some(refresh_token) = current_session.session.refresh_token.as_deref() {
+        revoke_best_effort(&app_state, refresh_token).await;
+    }
+
+    let mut url = app_state.oidc.end_session_url.clone();
+    url.query_pairs_mut()
+        .append_pair("id_token_hint", &current_session.session.id_token)
+        .append_pair(
+            "post_logout_redirect_uri",
+            app_state.oidc.public_base_url.as_str(),
+        )
+        .append_pair("client_id", app_state.client_id());
+
+    let mut response = Json(LogoutResponse {
+        logout_url: url.to_string(),
+    })
+    .into_response();
+    response
+        .headers_mut()
+        .append(SET_COOKIE, cookie::clear(cookie::SESSION, "Strict")?);
+    Ok(response)
+}
+
+async fn revoke_best_effort(app_state: &AppState, refresh_token: &str) {
+    let result = app_state
+        .http
+        .post(app_state.oidc.revocation_endpoint())
+        .form(&[
+            ("token", refresh_token),
+            ("token_type_hint", "refresh_token"),
+            ("client_id", app_state.client_id()),
+            ("client_secret", app_state.client_secret()),
+        ])
+        .send()
+        .await;
+    match result {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => warn!(status = %r.status(), "refresh token revocation rejected"),
+        Err(err) => warn!(%err, "refresh token revocation failed"),
+    }
+}
+
+#[derive(Deserialize)]
+struct LogoutTokenForm {
+    logout_token: String,
+}
+
+#[derive(Deserialize)]
+struct LogoutTokenClaims {
+    sid: Option<String>,
+    nonce: Option<Value>,
+    events: Map<String, Value>,
+}
+
+async fn backchannel_logout(
+    State(app_state): State<AppState>,
+    Form(form): Form<LogoutTokenForm>,
+) -> Result<StatusCode, AppError> {
+    let json = app_state
+        .oidc
+        .verifier
+        .verify(&form.logout_token)
+        .await
+        .map_err(LoginError::JwtVerificationError)?;
+
+    let claims: LogoutTokenClaims = serde_json::from_value(json)?;
+    if !claims.events.contains_key(BACKCHANNEL_LOGOUT_EVENT) || claims.nonce.is_some() {
+        return Err(LoginError::InvalidBackchannelLogoutToken.into());
+    }
+    let iam_sid = claims.sid.ok_or(LoginError::MissingSid)?;
+    let mut redis = app_state.redis.clone();
+    let removed = session::delete_by_iam_sid(&mut redis, &iam_sid).await?;
+    info!(removed, "backchannel logout ended sessions");
+    Ok(StatusCode::OK)
 }
 
 #[derive(Serialize)]

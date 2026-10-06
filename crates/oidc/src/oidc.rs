@@ -147,6 +147,10 @@ impl<P> OidcJwtVerifier<P> {
         &self.well_known_endpoint.token_endpoint
     }
 
+    pub fn revocation_endpoint(&self) -> &str {
+        &self.well_known_endpoint.revocation_endpoint
+    }
+
     /// Verifies `raw_token` and returns its payload untouched.
     ///
     /// Only an unreachable provider is not the token's fault; every other failure means the

@@ -57,6 +57,10 @@ fn session_key(hashed: &str) -> String {
     format!("bff:session:{hashed}")
 }
 
+fn iam_index_key(iam_sid: &str) -> String {
+    format!("bff:iam-sid:{iam_sid}")
+}
+
 fn kc_index_key(sid: &str) -> String {
     format!("bff:kc-sid:{sid}")
 }
@@ -123,6 +127,21 @@ pub async fn save(
 pub async fn delete(redis: &mut ConnectionManager, sid: &str) -> Result<(), AppError> {
     redis.del::<_, ()>(session_key(&hash_key(sid))).await?;
     Ok(())
+}
+
+pub async fn delete_by_iam_sid(
+    redis: &mut ConnectionManager,
+    sid: &str,
+) -> Result<usize, AppError> {
+    let index = iam_index_key(sid);
+    let hashed: Vec<String> = redis.smembers(&index).await?;
+
+    let keys: Vec<String> = hashed.iter().map(|h| session_key(h)).collect();
+    if !keys.is_empty() {
+        redis.del::<_, ()>(&keys).await?;
+    }
+    redis.del::<_, ()>(&index).await?;
+    Ok(keys.len())
 }
 
 pub struct CurrentSession {
