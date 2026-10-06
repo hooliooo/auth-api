@@ -12,11 +12,16 @@ pub(crate) struct AppState {
     pub http: Client,
     pub oidc: Arc<Oidc>,
     pub redis: ConnectionManager,
+    pub api_base_url: Option<Arc<str>>,
 }
 
 impl AppState {
     pub fn client_id(&self) -> &str {
         &self.oidc.config.client_id
+    }
+
+    pub fn client_secret(&self) -> &str {
+        &self.oidc.config.client_secret
     }
 
     pub fn redirect_uri(&self) -> &str {

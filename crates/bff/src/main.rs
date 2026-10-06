@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use axum::Router;
+use axum::{Router, middleware};
 use reqwest::{Client, redirect};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -14,10 +14,14 @@ use crate::{
 mod auth;
 mod cookie;
 mod crypto;
+mod csrf;
 mod env;
 mod error;
+mod health;
 mod pkce;
+mod proxy;
 mod random;
+mod sealed;
 mod session;
 mod state;
 
@@ -39,13 +43,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_connection_manager()
         .await?;
 
+    let api_base_url = std::env::var("API_BASE_URL").ok();
+
     let state = AppState {
         http: client,
         oidc: Arc::new(oidc),
         redis,
+        api_base_url: api_base_url.map(Arc::from),
     };
 
-    let app = Router::new().merge(auth::routes()).with_state(state);
+    let app = Router::new()
+        .merge(auth::routes())
+        .merge(proxy::routes())
+        .merge(health::routes())
+        .layer(middleware::from_fn(csrf::require_header))
+        .with_state(state);
     let listener = TcpListener::bind("0.0.0.0:5100").await?;
     info!("Listening on {}", listener.local_addr()?);
 

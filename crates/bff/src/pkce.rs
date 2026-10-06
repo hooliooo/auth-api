@@ -117,7 +117,9 @@ impl PkceAlgorithm for S256 {
     }
 }
 
+#[allow(dead_code)]
 pub struct PkceValidator;
+#[allow(dead_code)]
 impl PkceValidator {
     /// Verifies the code challenge with the code verifier
     pub fn verify<A: PkceAlgorithm>(

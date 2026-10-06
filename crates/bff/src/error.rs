@@ -16,8 +16,16 @@ pub enum AppError {
     Json(serde_json::Error),
     #[error("Login error: '{0}'")]
     LoginError(LoginError),
+    #[error("No API URL configured")]
+    NoApiUrl,
+    #[error("Proxy request error: '{0}'")]
+    ProxyRequestFailed(String),
     #[error(transparent)]
     Redis(RedisError),
+    #[error("Refreshing access token failed: '{0}'")]
+    RefreshAccessTokenFailed(String),
+    #[error(transparent)]
+    Response(axum::http::Error),
     #[error("Not signed in")]
     Unauthorized,
 }
@@ -64,6 +72,12 @@ impl From<RandomUnvailable> for AppError {
 impl From<RedisError> for AppError {
     fn from(value: RedisError) -> Self {
         AppError::Redis(value)
+    }
+}
+
+impl From<axum::http::Error> for AppError {
+    fn from(value: axum::http::Error) -> Self {
+        AppError::Response(value)
     }
 }
 

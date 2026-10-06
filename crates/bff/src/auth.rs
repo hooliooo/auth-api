@@ -9,12 +9,13 @@ use axum::{
     routing::get,
 };
 use oidc::oidc::{JwtVerificationError, JwtVerifier};
-use redis::AsyncCommands;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
+use crate::sealed;
+use crate::sealed::Purpose;
 use crate::session::CurrentSession;
 use crate::{
     cookie,
@@ -110,9 +111,9 @@ struct IdTokenClaims {
     nonce: Option<String>,
     #[serde(rename = "sid")]
     iam_sid: Option<String>,
-    preferred_username: Option<String>,
-    name: Option<String>,
-    email: Option<String>,
+    // preferred_username: Option<String>,
+    // name: Option<String>,
+    // email: Option<String>,
 }
 
 fn sanitize_return_url(url: Option<&str>, base: &Url) -> String {
@@ -161,16 +162,20 @@ async fn login(
         return_to: sanitize_return_url(q.return_url.as_deref(), &base_url),
     };
 
-    let mut redis = s.redis.clone();
-    redis
-        .set_ex::<_, _, ()>(
-            login_key(&state),
-            serde_json::to_string(&pending)?,
-            LOGIN_TTL_SECS,
-        )
-        .await?;
+    let sealed_pending = sealed::seal(
+        &state,
+        Purpose::PendingLogin,
+        &serde_json::to_vec(&pending)?,
+    )?;
 
-    // Add pending to redis
+    let mut redis = s.redis.clone();
+    redis::cmd("SET")
+        .arg(login_key(&state))
+        .arg(sealed_pending)
+        .arg("EX")
+        .arg(LOGIN_TTL_SECS)
+        .query_async::<()>(&mut redis)
+        .await?;
 
     let authz_endpoint = s.authorization_endpoint();
     let mut url = Url::parse(authz_endpoint)
@@ -216,12 +221,14 @@ async fn callback(
     }
 
     let mut redis = s.redis.clone();
-    let raw_pending_login: Option<String> = redis::cmd("GETDEL")
+    let raw_pending_login: Option<Vec<u8>> = redis::cmd("GETDEL")
         .arg(login_key(&state))
         .query_async(&mut redis)
         .await?;
-    let pending_login: PendingLogin =
-        serde_json::from_str(&raw_pending_login.ok_or(LoginError::InvalidPendingLogin)?)?;
+    let plaintext = raw_pending_login
+        .and_then(|raw| sealed::open(&state, Purpose::PendingLogin, &raw))
+        .ok_or(LoginError::InvalidPendingLogin)?;
+    let pending_login: PendingLogin = serde_json::from_slice(&plaintext)?;
 
     let token_response = exchange_code(&s, code.as_str(), &pending_login.verifier).await?;
     let json = s
