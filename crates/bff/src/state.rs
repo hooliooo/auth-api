@@ -1,9 +1,8 @@
-use std::sync::Arc;
-
 use oidc::{OidcJwtVerifier, ProviderClaims};
 use redis::aio::ConnectionManager;
 use reqwest::{Client, Url};
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::{env, error::StartupError};
 

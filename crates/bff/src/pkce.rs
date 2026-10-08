@@ -1,9 +1,8 @@
-use core::fmt;
-use std::marker::PhantomData;
-
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use core::fmt;
 use ring::digest::{self, Algorithm};
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
