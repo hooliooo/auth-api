@@ -1,0 +1,12 @@
+[package]
+name = "echo-api"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A stand-in API for the BFF's e2e tests: reports what the proxy forwarded and streams slowly.
+[dependencies]
+axum         = { workspace = true }
+futures-util = "0.3"
+serde_json   = { workspace = true }
+tokio        = { workspace = true }

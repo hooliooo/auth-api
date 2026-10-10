@@ -11,6 +11,7 @@ members  = [
   "crates/api/adapters/outbound/write-model",
 
   "crates/bff",
+  "crates/echo-api",
   "crates/oidc",
 ]
 

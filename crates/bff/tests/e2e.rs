@@ -2,14 +2,36 @@
 
 mod support;
 
+use std::time::Instant;
+
 use redis::AsyncCommands;
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode, header::CACHE_CONTROL};
 use serde_json::Value;
 
 use crate::support::{
-    Browser, bff, hash_key, location, login_url, open_sealed, query_param, redis, set_cookie,
-    sign_in, sign_in_until_callback, wait_for_bff,
+    Browser, bff, end_keycloak_session, eventually, hash_key, index_members, location, login_url,
+    open_sealed, query_param, read_session, redis, set_cookie, sign_in, sign_in_until_callback,
+    wait_for_bff, write_session,
 };
+
+fn assert_no_store(response: &reqwest::Response, what: &str) {
+    assert_eq!(
+        response
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "{what} must not be cached"
+    );
+}
+
+/// The Keycloak session id stored in a BFF session.
+async fn keycloak_sid(sid: &str) -> String {
+    read_session(sid).await.expect("session exists")["sid"]
+        .as_str()
+        .expect("Keycloak sent a sid")
+        .to_owned()
+}
 
 async fn pending_login(state: &str) -> (Option<Value>, i64) {
     let mut redis = redis().await;
@@ -143,12 +165,13 @@ async fn given_valid_credentials_when_logging_in_then_it_should_succeed_with_a_s
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(location(&callback).path(), "/dashboard");
 
+    assert_no_store(&callback, "the callback");
     let session_cookie = set_cookie(&callback, "__Host-bff").expect("the cookie should exist");
+    let lowered = session_cookie.to_ascii_lowercase();
+    assert!(lowered.contains("samesite=strict"), "{session_cookie}");
     assert!(
-        session_cookie
-            .to_ascii_lowercase()
-            .contains("samesite=strict"),
-        "{session_cookie}"
+        lowered.contains("max-age=86400"),
+        "the cookie lives for the 24 h cap, not the 1 h idle timeout: {session_cookie}"
     );
     assert!(
         browser.cookie("__Host-bff-login").is_none(),
@@ -161,6 +184,7 @@ async fn given_valid_credentials_when_logging_in_then_it_should_succeed_with_a_s
 
     let my_session = browser.get(bff("/auth/session").as_str()).await;
     assert_eq!(my_session.status(), StatusCode::OK);
+    assert_no_store(&my_session, "/auth/session");
     let body: Value = my_session.json().await.unwrap();
     assert!(
         body["sub"].as_str().is_some_and(|s| !s.is_empty()),
@@ -238,6 +262,7 @@ async fn given_an_existing_session_when_signing_in_again_then_the_old_session_is
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
     let first = browser.cookie("__Host-bff").unwrap().to_owned();
+    let first_keycloak_sid = keycloak_sid(&first).await;
 
     sign_in(&mut browser, "/").await;
     let second = browser.cookie("__Host-bff").unwrap().to_owned();
@@ -245,6 +270,12 @@ async fn given_an_existing_session_when_signing_in_again_then_the_old_session_is
     assert_ne!(first, second, "a fresh session id is issued");
     assert_eq!(session_ttl(&first).await, -2, "old session key is deleted");
     assert!(session_ttl(&second).await > 0);
+    assert!(
+        !index_members(&first_keycloak_sid)
+            .await
+            .contains(&hash_key(&first)),
+        "the old session leaves the back-channel index"
+    );
 }
 
 #[tokio::test]
@@ -298,12 +329,15 @@ async fn given_a_session_when_logging_out_then_it_ends_and_keycloak_logout_is_re
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
     let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let keycloak_sid = keycloak_sid(&sid).await;
+    assert!(index_members(&keycloak_sid).await.contains(&hash_key(&sid)));
 
     let response = browser
         .post(bff("/auth/logout").as_str(), &[("x-bff-csrf", "1")])
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_no_store(&response, "logout");
     let cleared = set_cookie(&response, "__Host-bff").expect("session cookie is cleared");
     assert!(
         cleared.to_ascii_lowercase().contains("max-age=0"),
@@ -320,6 +354,10 @@ async fn given_a_session_when_logging_out_then_it_ends_and_keycloak_logout_is_re
     assert!(query_param(&logout_url, "id_token_hint").is_some());
 
     assert!(raw_session(&sid).await.is_none(), "session key is deleted");
+    assert!(
+        !index_members(&keycloak_sid).await.contains(&hash_key(&sid)),
+        "the session leaves the back-channel index"
+    );
     let session_response = browser.get(bff("/auth/session").as_str()).await;
     assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
 }
@@ -337,4 +375,258 @@ async fn given_a_running_app_when_probing_health_then_live_and_ready_should_succ
         browser.get(bff("/health/ready").as_str()).await.status(),
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn given_keycloak_ends_the_sign_in_when_it_notifies_the_bff_then_the_session_ends() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let keycloak_sid = keycloak_sid(&sid).await;
+    assert!(
+        index_members(&keycloak_sid).await.contains(&hash_key(&sid)),
+        "sign-in records the session in the back-channel index"
+    );
+
+    end_keycloak_session(&keycloak_sid).await;
+
+    eventually("the BFF session is gone", || async {
+        raw_session(&sid).await.is_none()
+    })
+    .await;
+    assert!(index_members(&keycloak_sid).await.is_empty());
+    let session_response = browser.get(bff("/auth/session").as_str()).await;
+    assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn given_an_expired_access_token_when_calling_the_api_then_it_is_refreshed_first() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let mut session = read_session(&sid).await.unwrap();
+    let old_access_token = session["access_token"].as_str().unwrap().to_owned();
+    session["expires_at"] = 0.into();
+    write_session(&sid, &session).await;
+
+    let response = browser
+        .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let echoed: Value = response.json().await.unwrap();
+    let refreshed = read_session(&sid)
+        .await
+        .expect("session survives the refresh");
+    let new_access_token = refreshed["access_token"].as_str().unwrap();
+    assert_ne!(new_access_token, old_access_token, "a new access token");
+    assert!(refreshed["expires_at"].as_u64().unwrap() > 0);
+    assert_eq!(
+        echoed["headers"]["authorization"],
+        format!("Bearer {new_access_token}"),
+        "the API receives the refreshed token"
+    );
+}
+
+#[tokio::test]
+async fn given_a_refresh_token_keycloak_rejects_when_calling_the_api_then_the_session_ends() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let keycloak_sid = keycloak_sid(&sid).await;
+    let mut session = read_session(&sid).await.unwrap();
+    session["expires_at"] = 0.into();
+    session["refresh_token"] = "not-a-refresh-token".into();
+    write_session(&sid, &session).await;
+
+    let response = browser
+        .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
+        .await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(raw_session(&sid).await.is_none(), "session is deleted");
+    assert!(!index_members(&keycloak_sid).await.contains(&hash_key(&sid)));
+}
+
+#[tokio::test]
+async fn given_a_session_when_calling_the_api_then_only_the_bearer_is_forwarded() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let access_token = read_session(&sid).await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let response = browser
+        .request(
+            Method::GET,
+            bff("/api/echo/orders?page=2").as_str(),
+            &[("authorization", "Bearer forged"), ("x-trace", "keep-me")],
+            None,
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get("set-cookie").is_none(),
+        "the API's Set-Cookie is stripped"
+    );
+    assert_eq!(response.headers().get("x-echo").unwrap(), "1");
+    let echoed: Value = response.json().await.unwrap();
+    assert_eq!(echoed["path"], "/echo/orders", "/api is stripped");
+    assert_eq!(echoed["query"], "page=2");
+    let headers = &echoed["headers"];
+    assert_eq!(headers["authorization"], format!("Bearer {access_token}"));
+    assert!(
+        headers.get("cookie").is_none(),
+        "browser cookies stay at the BFF"
+    );
+    assert_eq!(
+        headers["x-trace"], "keep-me",
+        "ordinary headers pass through"
+    );
+}
+
+#[tokio::test]
+async fn given_forged_forwarding_headers_when_calling_the_api_then_only_the_bffs_own_reach_it() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+
+    let response = browser
+        .request(
+            Method::GET,
+            bff("/api/echo/orders").as_str(),
+            &[
+                ("x-forwarded-for", "1.2.3.4"),
+                ("forwarded", "for=1.2.3.4;proto=http"),
+                ("x-forwarded-host", "evil.example"),
+                ("x-forwarded-proto", "http"),
+                ("x-real-ip", "1.2.3.4"),
+                ("true-client-ip", "1.2.3.4"),
+            ],
+            None,
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let echoed: Value = response.json().await.unwrap();
+    let headers = &echoed["headers"];
+    assert_eq!(
+        headers["x-forwarded-for"], browser.client_ip,
+        "the API sees the client address the BFF determined"
+    );
+    for forged in [
+        "forwarded",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+        "true-client-ip",
+        "cf-connecting-ip",
+    ] {
+        assert!(
+            headers.get(forged).is_none(),
+            "{forged} must not reach the API"
+        );
+    }
+}
+
+/// Needs a BFF built with the `rate-limit` feature (the default).
+#[cfg(feature = "rate-limit")]
+#[tokio::test]
+async fn given_too_many_sign_in_starts_from_one_client_then_it_is_limited_but_others_are_not() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    let mut limited = None;
+    // The compose stack allows 10 a minute; a minute boundary can reset the count once.
+    for _ in 0..25 {
+        let response = browser.get(&login_url("/")).await;
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            limited = Some(response);
+            break;
+        }
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    let limited = limited.expect("the 11th sign-in start in a minute is refused");
+    let retry_after: u64 = limited.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&retry_after), "retry-after {retry_after}");
+
+    let mut someone_else = Browser::new();
+    assert_eq!(
+        someone_else.get(&login_url("/")).await.status(),
+        StatusCode::SEE_OTHER,
+        "other clients keep their own allowance"
+    );
+}
+
+#[tokio::test]
+async fn given_a_write_through_the_api_when_the_csrf_header_is_missing_then_it_is_forbidden() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+
+    let refused = browser
+        .request(
+            Method::POST,
+            bff("/api/echo/orders").as_str(),
+            &[],
+            Some("{}"),
+        )
+        .await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+    let accepted = browser
+        .request(
+            Method::POST,
+            bff("/api/echo/orders").as_str(),
+            &[("x-bff-csrf", "1"), ("content-type", "application/json")],
+            Some(r#"{"item":42}"#),
+        )
+        .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let echoed: Value = accepted.json().await.unwrap();
+    assert_eq!(echoed["method"], "POST");
+    assert_eq!(echoed["body"], r#"{"item":42}"#);
+    assert!(
+        echoed["headers"].get("x-bff-csrf").is_none(),
+        "the CSRF header stays at the BFF"
+    );
+}
+
+#[tokio::test]
+async fn given_no_session_when_calling_the_api_then_it_is_unauthorized() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    let response = browser
+        .request(Method::GET, bff("/api/echo/orders").as_str(), &[], None)
+        .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Takes about 12 seconds: longer than the 10-second limit on Keycloak calls.
+#[tokio::test]
+async fn given_a_slow_streamed_response_when_proxied_then_it_is_not_cut_off() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let started = Instant::now();
+
+    let response = browser
+        .request(Method::GET, bff("/api/slow?secs=12").as_str(), &[], None)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.expect("the whole body arrives");
+
+    assert_eq!(body.lines().count(), 12, "{body}");
+    assert!(started.elapsed().as_secs() >= 11);
 }

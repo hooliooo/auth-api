@@ -4,6 +4,7 @@
 //! standard validations. Each provider adds only how its claims are read, e.g. [`keycloak`].
 
 mod cache;
+pub mod logout;
 pub mod oidc;
 
 pub use oidc::{

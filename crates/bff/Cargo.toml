@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["e2e"]
+default = ["e2e", "rate-limit"]
 e2e = []
+# Per-client limit on sign-in starts, kept in Redis. Leave it out when something in front,
+# such as Cloudflare, already limits /auth/login.
+rate-limit = []
 
 [dependencies]
 async-trait.workspace        = true

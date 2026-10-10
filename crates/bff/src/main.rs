@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{Router, middleware};
 use reqwest::{Client, redirect};
@@ -7,11 +7,13 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::{
+    error::StartupError,
     random::random_token,
     state::{AppState, Oidc, OidcConfig},
 };
 
 mod auth;
+mod client_ip;
 mod cookie;
 mod crypto;
 mod csrf;
@@ -21,6 +23,8 @@ mod health;
 mod pkce;
 mod proxy;
 mod random;
+#[cfg(feature = "rate-limit")]
+mod rate_limit;
 mod sealed;
 mod session;
 mod state;
@@ -56,6 +60,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         oidc: Arc::new(oidc),
         redis,
         api_base_url: api_base_url.map(Arc::from),
+        client_ip_header: std::env::var("CLIENT_IP_HEADER")
+            .ok()
+            .map(|name| {
+                axum::http::HeaderName::try_from(name)
+                    .map_err(|_| StartupError::InvalidSetting("CLIENT_IP_HEADER"))
+            })
+            .transpose()?,
+        #[cfg(feature = "rate-limit")]
+        login_per_minute: std::env::var("LOGIN_RATE_LIMIT_PER_MINUTE")
+            .ok()
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| StartupError::InvalidSetting("LOGIN_RATE_LIMIT_PER_MINUTE"))
+            })
+            .transpose()?
+            .unwrap_or(10),
     };
 
     let app = Router::new()
@@ -67,9 +88,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("0.0.0.0:5100").await?;
     info!("Listening on {}", listener.local_addr()?);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // The peer address is the fallback client IP for rate limiting and X-Forwarded-For.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

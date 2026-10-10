@@ -10,7 +10,12 @@ use axum::{
     routing::any,
 };
 
+use std::net::SocketAddr;
+
+use axum::extract::ConnectInfo;
+
 use crate::{
+    client_ip::client_ip,
     csrf::CSRF_HEADER,
     error::AppError,
     session::{CurrentSession, refresh_access_token},
@@ -32,8 +37,21 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/api/{*rest}", any(api))
 }
 
+/// Headers a browser could use to claim another address or scheme; the API only ever sees
+/// the X-Forwarded-For the BFF sets itself.
+const FORWARDING: [&str; 7] = [
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+    "cf-connecting-ip",
+    "true-client-ip",
+];
+
 async fn api(
     State(app_state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     current_session: CurrentSession,
     request: Request,
 ) -> Result<Response, AppError> {
@@ -58,6 +76,14 @@ async fn api(
         headers.remove(name);
     }
     headers.remove(CSRF_HEADER);
+    let client = client_ip(&headers, peer, app_state.client_ip_header.as_ref());
+    for name in FORWARDING {
+        headers.remove(name);
+    }
+    headers.insert(
+        HeaderName::from_static("x-forwarded-for"),
+        HeaderValue::from_str(&client.to_string())?,
+    );
     headers.insert(
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {token}"))?,

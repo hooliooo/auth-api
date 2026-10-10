@@ -1,3 +1,5 @@
+#[cfg(feature = "rate-limit")]
+use axum::http::header::RETRY_AFTER;
 use axum::http::{StatusCode, header::InvalidHeaderValue};
 use axum::response::{IntoResponse, Response};
 use oidc::OidcSetupError;
@@ -26,12 +28,24 @@ pub enum AppError {
     RefreshAccessTokenFailed(String),
     #[error(transparent)]
     Response(axum::http::Error),
+    #[cfg(feature = "rate-limit")]
+    #[error("Too many requests; retry after {retry_after} s")]
+    TooManyRequests { retry_after: u64 },
     #[error("Not signed in")]
     Unauthorized,
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        #[cfg(feature = "rate-limit")]
+        if let AppError::TooManyRequests { retry_after } = self {
+            debug!(retry_after, "rate limited");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(RETRY_AFTER, retry_after.to_string())],
+            )
+                .into_response();
+        }
         let status = match &self {
             AppError::LoginError(_) | AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -87,6 +101,8 @@ pub enum StartupError {
     MissingEnv(String),
     #[error("invalid URL in {0}")]
     InvalidUrl(&'static str),
+    #[error("invalid value in {0}")]
+    InvalidSetting(&'static str),
     #[error(transparent)]
     Oidc(#[from] OidcSetupError),
 }

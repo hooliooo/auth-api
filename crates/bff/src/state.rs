@@ -1,3 +1,4 @@
+use axum::http::HeaderName;
 use oidc::{OidcJwtVerifier, ProviderClaims};
 use redis::aio::ConnectionManager;
 use reqwest::{Client, Url};
@@ -13,6 +14,11 @@ pub(crate) struct AppState {
     pub oidc: Arc<Oidc>,
     pub redis: ConnectionManager,
     pub api_base_url: Option<Arc<str>>,
+    /// Header holding the real client IP when a proxy such as Cloudflare sits in front.
+    pub client_ip_header: Option<HeaderName>,
+    /// Sign-in starts allowed per client IP and minute; 0 turns the limit off.
+    #[cfg(feature = "rate-limit")]
+    pub login_per_minute: u32,
 }
 
 impl AppState {

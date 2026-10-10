@@ -12,6 +12,12 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  # Stand-in API for the e2e tests: echoes what the BFF forwards.
+  echo-api:
+    build:
+      context: ../..
+      dockerfile: crates/echo-api/Dockerfile
+    container_name: bff-echo-api
   bff:
     build: 
       context: ../..
@@ -27,9 +33,15 @@ services:
       CLIENT_SECRET: bff.secret
       REDIRECT_URI: http://localhost:5100/auth/callback
       REDIS_URI: redis://redis:6379
+      API_BASE_URL: http://echo-api:8000
+      # As behind Cloudflare: the tests send each simulated browser's address in this header.
+      CLIENT_IP_HEADER: cf-connecting-ip
+      LOGIN_RATE_LIMIT_PER_MINUTE: "10"
     depends_on: 
       redis:
         condition: service_healthy
+      echo-api:
+        condition: service_started
       keycloak-api:
         condition: service_healthy
     restart: on-failure

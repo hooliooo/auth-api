@@ -13,15 +13,22 @@ use axum::{
 use oidc::oidc::{JwtVerificationError, JwtVerifier};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::Map;
 use serde_json::Value;
 use thiserror::Error;
 use tracing::info;
 use tracing::warn;
 
+#[cfg(feature = "rate-limit")]
+use std::net::SocketAddr;
+
+#[cfg(feature = "rate-limit")]
+use axum::extract::ConnectInfo;
+
 use crate::sealed;
 use crate::sealed::Purpose;
 use crate::session::CurrentSession;
+#[cfg(feature = "rate-limit")]
+use crate::{client_ip::client_ip, rate_limit};
 use crate::{
     cookie,
     crypto::{constant_time_eq, hash_key},
@@ -33,7 +40,12 @@ use crate::{
 };
 
 const LOGIN_TTL_SECS: u64 = 300;
-const BACKCHANNEL_LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
+/// How old a back-channel logout token may be; older ones are refused even before they expire.
+const LOGOUT_TOKEN_MAX_AGE_SECS: u64 = 120;
+/// How long a logout token's `jti` is remembered: past this, its `iat` is too old anyway.
+const LOGOUT_JTI_TTL_SECS: u64 = LOGOUT_TOKEN_MAX_AGE_SECS + 2 * oidc::oidc::LEEWAY_SECS;
+/// Keycloak's `typ` for ID tokens.
+const ID_TOKEN_TYPE: &str = "ID";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -54,6 +66,8 @@ pub enum LoginError {
     InvalidAuthorizationEndpoint(String),
     #[error("Invalid backchannel logout token")]
     InvalidBackchannelLogoutToken,
+    #[error("Invalid ID token: {0}")]
+    InvalidIdToken(&'static str),
     #[error("Missing code or state")]
     InvalidCallbackQuery,
     #[error("Invalid nonce")]
@@ -121,6 +135,10 @@ struct TokenResponse {
 struct IdTokenClaims {
     sub: String,
     nonce: Option<String>,
+    typ: Option<String>,
+    azp: Option<String>,
+    /// A single string or a list (OIDC Core §2).
+    aud: Value,
     #[serde(rename = "sid")]
     iam_sid: Option<String>,
     // preferred_username: Option<String>,
@@ -154,8 +172,17 @@ fn login_key(state: &str) -> String {
 
 async fn login(
     State(s): State<AppState>,
+    #[cfg(feature = "rate-limit")] ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    #[cfg(feature = "rate-limit")] request_headers: HeaderMap,
     Query(q): Query<LoginQuery>,
 ) -> Result<Response, AppError> {
+    // Every sign-in start writes to Redis without a session, so it is limited per client.
+    #[cfg(feature = "rate-limit")]
+    {
+        let client = client_ip(&request_headers, peer, s.client_ip_header.as_ref());
+        rate_limit::check_login(&mut s.redis.clone(), client, s.login_per_minute).await?;
+    }
+
     let (state, nonce, verifier) = (
         random_token()?,
         random_token()?,
@@ -250,6 +277,7 @@ async fn callback(
         .await
         .map_err(LoginError::JwtVerificationError)?;
     let id_token_claims = serde_json::from_value::<IdTokenClaims>(json)?;
+    check_id_token(&id_token_claims, s.client_id())?;
     match id_token_claims.nonce.as_deref() {
         Some(nonce) if constant_time_eq(nonce, &pending_login.nonce) => {}
         _ => return Err(LoginError::InvalidNonce.into()),
@@ -387,13 +415,6 @@ struct LogoutTokenForm {
     logout_token: String,
 }
 
-#[derive(Deserialize)]
-struct LogoutTokenClaims {
-    sid: Option<String>,
-    nonce: Option<Value>,
-    events: Map<String, Value>,
-}
-
 async fn backchannel_logout(
     State(app_state): State<AppState>,
     Form(form): Form<LogoutTokenForm>,
@@ -405,12 +426,25 @@ async fn backchannel_logout(
         .await
         .map_err(LoginError::JwtVerificationError)?;
 
-    let claims: LogoutTokenClaims = serde_json::from_value(json)?;
-    if !claims.events.contains_key(BACKCHANNEL_LOGOUT_EVENT) || claims.nonce.is_some() {
-        return Err(LoginError::InvalidBackchannelLogoutToken.into());
-    }
+    // The logout event, no nonce, a session or subject, and a fresh iat (Back-Channel Logout §2.6).
+    let claims = oidc::logout::logout_claims(&json, now(), LOGOUT_TOKEN_MAX_AGE_SECS)
+        .map_err(LoginError::JwtVerificationError)?;
     let iam_sid = claims.sid.ok_or(LoginError::MissingSid)?;
     let mut redis = app_state.redis.clone();
+
+    // Each logout token is accepted once: a captured token replayed later is refused.
+    let first_use: Option<String> = redis::cmd("SET")
+        .arg(format!("bff:logout-jti:{}", hash_key(&claims.jti)))
+        .arg(1)
+        .arg("NX")
+        .arg("EX")
+        .arg(LOGOUT_JTI_TTL_SECS)
+        .query_async(&mut redis)
+        .await?;
+    if first_use.is_none() {
+        return Err(LoginError::InvalidBackchannelLogoutToken.into());
+    }
+
     let removed = session::delete_by_iam_sid(&mut redis, &iam_sid).await?;
     info!(removed, "backchannel logout ended sessions");
     Ok(StatusCode::OK)
@@ -432,4 +466,68 @@ fn no_store(mut response: Response) -> Response {
 async fn current(current: CurrentSession) -> Response {
     let s = current.session;
     no_store(Json(SessionInfo { sub: s.sub }).into_response())
+}
+
+/// The ID token checks OIDC Core §3.1.3.7 adds to signature, issuer, audience and expiry:
+/// it must be an ID token, and if it names an authorized party, that must be this client.
+fn check_id_token(claims: &IdTokenClaims, client_id: &str) -> Result<(), LoginError> {
+    if claims.typ.as_deref() != Some(ID_TOKEN_TYPE) {
+        return Err(LoginError::InvalidIdToken("not an ID token"));
+    }
+    let several_audiences = claims
+        .aud
+        .as_array()
+        .is_some_and(|audiences| audiences.len() > 1);
+    match claims.azp.as_deref() {
+        Some(azp) if azp != client_id => {
+            Err(LoginError::InvalidIdToken("issued to another client"))
+        }
+        None if several_audiences => Err(LoginError::InvalidIdToken("several audiences, no azp")),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn id_token(extra: Value) -> IdTokenClaims {
+        let mut claims = json!({ "sub": "user", "typ": "ID", "aud": "bff", "azp": "bff" });
+        for (key, value) in extra.as_object().unwrap() {
+            if value.is_null() {
+                claims.as_object_mut().unwrap().remove(key);
+            } else {
+                claims[key] = value.clone();
+            }
+        }
+        serde_json::from_value(claims).unwrap()
+    }
+
+    #[test]
+    fn given_an_id_token_for_this_client_then_it_is_accepted() {
+        assert!(check_id_token(&id_token(json!({})), "bff").is_ok());
+        assert!(check_id_token(&id_token(json!({ "azp": null })), "bff").is_ok());
+    }
+
+    #[test]
+    fn given_another_token_type_then_it_is_refused() {
+        for typ in [json!("Bearer"), json!("Logout"), Value::Null] {
+            assert!(check_id_token(&id_token(json!({ "typ": typ })), "bff").is_err());
+        }
+    }
+
+    #[test]
+    fn given_another_authorized_party_then_it_is_refused() {
+        assert!(check_id_token(&id_token(json!({ "azp": "other" })), "bff").is_err());
+    }
+
+    #[test]
+    fn given_several_audiences_then_azp_is_required() {
+        let several = json!({ "aud": ["bff", "account"], "azp": null });
+        assert!(check_id_token(&id_token(several), "bff").is_err());
+        let with_azp = json!({ "aud": ["bff", "account"] });
+        assert!(check_id_token(&id_token(with_azp), "bff").is_ok());
+    }
 }

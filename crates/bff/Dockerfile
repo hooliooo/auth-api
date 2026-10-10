@@ -1,10 +1,12 @@
 FROM rust:1.98-trixie AS build
 WORKDIR /src
+# Cargo features of the image; e.g. --build-arg FEATURES= for a build without the rate limit.
+ARG FEATURES=rate-limit
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p bff \
+    cargo build --release --locked -p bff --no-default-features --features "$FEATURES" \
  && cp target/release/bff /bff
 
 FROM debian:trixie-slim

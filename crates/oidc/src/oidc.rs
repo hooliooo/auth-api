@@ -19,6 +19,15 @@ const KEY_TTL: Duration = Duration::from_secs(10 * 60);
 /// The minimum time between two refetch attempts.
 const KEY_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Allowed clock difference with the provider when checking `exp`, `nbf` and `iat`.
+pub const LEEWAY_SECS: u64 = 30;
+
+/// Claims every accepted token must carry. jsonwebtoken only checks `aud` and `iss` when they
+/// are present, so without this a token that simply leaves `aud` out passes the audience check.
+/// `sub` is not listed: a back-channel logout token may carry only `sid`. jsonwebtoken cannot
+/// require `iat`, so [`OidcJwtVerifier::verify_payload`] checks it.
+const REQUIRED_CLAIMS: [&str; 3] = ["exp", "iss", "aud"];
+
 /// The asymmetric algorithms a signing key may use. Which one applies to a token is decided
 /// by the key that signed it, never by the token's own header.
 ///
@@ -121,22 +130,29 @@ impl<P> OidcJwtVerifier<P> {
 
         let source = HttpJwksSource::new(client, well_known_endpoint.jwks_uri.clone());
         let keys = Cache::new(source, KEY_TTL, KEY_MIN_REFRESH_INTERVAL).await?;
+        Ok(Self::from_parts(well_known_endpoint, keys, &audience))
+    }
 
+    /// Assembles a verifier from an already loaded discovery document and key cache.
+    fn from_parts(well_known_endpoint: WellKnownEndpoint, keys: Cache, audience: &str) -> Self {
         let validations = ALGORITHMS
             .into_iter()
             .map(|algorithm| {
                 let mut validation = Validation::new(algorithm);
-                validation.set_audience(&[audience.as_str()]);
+                validation.set_audience(&[audience]);
                 validation.set_issuer(&[well_known_endpoint.issuer.as_str()]);
+                validation.set_required_spec_claims(&REQUIRED_CLAIMS);
+                validation.validate_nbf = true;
+                validation.leeway = LEEWAY_SECS;
                 (algorithm, validation)
             })
             .collect();
-        Ok(Self {
+        Self {
             well_known_endpoint,
             keys: Arc::new(keys),
             validations,
             _marker: PhantomData,
-        })
+        }
     }
 
     pub fn well_known_endpoint(&self) -> &WellKnownEndpoint {
@@ -175,10 +191,30 @@ impl<P> OidcJwtVerifier<P> {
             JwtVerificationError::Invalid(format!("unsupported algorithm {:?}", header.alg))
         })?;
 
-        decode::<Value>(raw_token, &key.key, validation)
+        let payload = decode::<Value>(raw_token, &key.key, validation)
             .map(|token| token.claims)
-            .map_err(|error| JwtVerificationError::Invalid(format!("{:?}", error.into_kind())))
+            .map_err(|error| JwtVerificationError::Invalid(format!("{:?}", error.into_kind())))?;
+        check_issued_at(&payload)?;
+        Ok(payload)
     }
+}
+
+/// `iat` must be present and not in the future: a token "issued" later than now was not made
+/// by a provider whose clock agrees with ours.
+fn check_issued_at(payload: &Value) -> Result<(), JwtVerificationError> {
+    let iat = payload
+        .get("iat")
+        .and_then(Value::as_u64)
+        .ok_or(JwtVerificationError::MissingClaim("iat"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    if iat > now + LEEWAY_SECS {
+        return Err(JwtVerificationError::Invalid(
+            "token issued in the future".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -247,4 +283,254 @@ pub enum OidcSetupError {
     IssuerMismatch { expected: String, found: String },
     #[error("Could not load the signing keys: {0}")]
     SigningKeys(#[from] SourceError),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use async_trait::async_trait;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use jsonwebtoken::jwk::JwkSet;
+    use ring::{
+        hmac,
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::cache::{Cache, JwksSource, SourceError};
+
+    const ISSUER: &str = "https://idp.example/realms/test";
+    const AUDIENCE: &str = "api";
+
+    fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn encode(value: &Value) -> String {
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).unwrap())
+    }
+
+    /// A signing key generated per test, published under `kid`.
+    struct TestKey {
+        kid: &'static str,
+        pair: Ed25519KeyPair,
+    }
+
+    impl TestKey {
+        fn new(kid: &'static str) -> Self {
+            let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+            Self {
+                kid,
+                pair: Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap(),
+            }
+        }
+
+        fn jwk(&self) -> Value {
+            json!({
+                "kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA", "kid": self.kid,
+                "x": URL_SAFE_NO_PAD.encode(self.pair.public_key().as_ref()),
+            })
+        }
+
+        fn sign(&self, header: &Value, claims: &Value) -> String {
+            let input = format!("{}.{}", encode(header), encode(claims));
+            let signature = self.pair.sign(input.as_bytes());
+            format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()))
+        }
+
+        fn token(&self, claims: &Value) -> String {
+            self.sign(
+                &json!({ "alg": "EdDSA", "typ": "JWT", "kid": self.kid }),
+                claims,
+            )
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticSource(JwkSet);
+
+    #[async_trait]
+    impl JwksSource for StaticSource {
+        async fn fetch(&self) -> Result<JwkSet, SourceError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct Raw;
+
+    impl ProviderClaims for Raw {
+        type Claims = Value;
+        fn claims(payload: Value) -> Result<Value, JwtVerificationError> {
+            Ok(payload)
+        }
+    }
+
+    async fn verifier(published: &[&TestKey]) -> OidcJwtVerifier<Raw> {
+        let keys: Vec<Value> = published.iter().map(|key| key.jwk()).collect();
+        let set: JwkSet = serde_json::from_value(json!({ "keys": keys })).unwrap();
+        let cache = Cache::new(StaticSource(set), KEY_TTL, KEY_MIN_REFRESH_INTERVAL)
+            .await
+            .unwrap();
+        let endpoint = |path: &str| format!("{ISSUER}/{path}");
+        let well_known = WellKnownEndpoint {
+            issuer: ISSUER.to_owned(),
+            authorization_endpoint: endpoint("auth"),
+            token_endpoint: endpoint("token"),
+            end_session_endpoint: endpoint("logout"),
+            jwks_uri: endpoint("certs"),
+            revocation_endpoint: endpoint("revoke"),
+        };
+        OidcJwtVerifier::from_parts(well_known, cache, AUDIENCE)
+    }
+
+    fn claims() -> Value {
+        let now = now();
+        json!({ "iss": ISSUER, "aud": AUDIENCE, "sub": "user-1", "iat": now, "exp": now + 300 })
+    }
+
+    fn without(claim: &str) -> Value {
+        let mut claims = claims();
+        claims.as_object_mut().unwrap().remove(claim);
+        claims
+    }
+
+    fn with(claim: &str, value: Value) -> Value {
+        let mut claims = claims();
+        claims[claim] = value;
+        claims
+    }
+
+    async fn assert_refused(verifier: &OidcJwtVerifier<Raw>, token: &str, why: &str) {
+        let result = verifier.verify(token).await;
+        assert!(
+            matches!(result, Err(JwtVerificationError::Invalid(_))),
+            "{why}: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn given_a_valid_token_then_its_payload_is_returned() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        let payload = verifier.verify(&key.token(&claims())).await.unwrap();
+        assert_eq!(payload["sub"], "user-1");
+    }
+
+    #[tokio::test]
+    async fn given_a_missing_or_wrong_audience_then_it_is_refused() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        assert_refused(&verifier, &key.token(&without("aud")), "no aud").await;
+        assert_refused(
+            &verifier,
+            &key.token(&with("aud", json!("other"))),
+            "other aud",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn given_a_missing_or_wrong_issuer_then_it_is_refused() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        assert_refused(&verifier, &key.token(&without("iss")), "no iss").await;
+        let other = with("iss", json!("https://evil.example/realms/test"));
+        assert_refused(&verifier, &key.token(&other), "other iss").await;
+    }
+
+    #[tokio::test]
+    async fn given_a_missing_iat_or_exp_then_it_is_refused() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        assert!(matches!(
+            verifier.verify(&key.token(&without("iat"))).await,
+            Err(JwtVerificationError::MissingClaim("iat"))
+        ));
+        assert_refused(&verifier, &key.token(&without("exp")), "no exp").await;
+        let future = with("iat", json!(now() + LEEWAY_SECS + 60));
+        assert_refused(&verifier, &key.token(&future), "iat in the future").await;
+    }
+
+    #[tokio::test]
+    async fn given_an_expired_token_then_only_the_leeway_is_tolerated() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        let just_expired = with("exp", json!(now() - LEEWAY_SECS / 2));
+        assert!(verifier.verify(&key.token(&just_expired)).await.is_ok());
+        let expired = with("exp", json!(now() - LEEWAY_SECS - 5));
+        assert_refused(&verifier, &key.token(&expired), "expired").await;
+    }
+
+    #[tokio::test]
+    async fn given_a_token_that_is_not_valid_yet_then_it_is_refused() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        let future = with("nbf", json!(now() + LEEWAY_SECS + 60));
+        assert_refused(&verifier, &key.token(&future), "nbf in the future").await;
+    }
+
+    #[tokio::test]
+    async fn given_alg_none_then_it_is_refused() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        let header = encode(&json!({ "alg": "none", "kid": "k1" }));
+        let token = format!("{header}.{}.", encode(&claims()));
+        assert_refused(&verifier, &token, "alg none").await;
+    }
+
+    /// The classic key-confusion attack: an HMAC signature keyed with the public key.
+    #[tokio::test]
+    async fn given_hs256_signed_with_the_public_key_then_it_is_refused() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        let input = format!(
+            "{}.{}",
+            encode(&json!({ "alg": "HS256", "typ": "JWT", "kid": "k1" })),
+            encode(&claims())
+        );
+        let mac = hmac::Key::new(hmac::HMAC_SHA256, key.pair.public_key().as_ref());
+        let signature = hmac::sign(&mac, input.as_bytes());
+        let token = format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()));
+        assert_refused(&verifier, &token, "HS256 with the public key").await;
+    }
+
+    #[tokio::test]
+    async fn given_a_signature_by_another_key_then_it_is_refused() {
+        let published = TestKey::new("k1");
+        let attacker = TestKey::new("k1");
+        let verifier = verifier(&[&published]).await;
+        assert_refused(
+            &verifier,
+            &attacker.token(&claims()),
+            "foreign key, same kid",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn given_no_or_an_unknown_key_id_then_it_is_refused() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        let no_kid = key.sign(&json!({ "alg": "EdDSA" }), &claims());
+        assert_refused(&verifier, &no_kid, "no kid").await;
+        let unknown = TestKey::new("k2");
+        assert_refused(&verifier, &unknown.token(&claims()), "unknown kid").await;
+    }
+
+    #[tokio::test]
+    async fn given_a_tampered_payload_then_it_is_refused() {
+        let key = TestKey::new("k1");
+        let verifier = verifier(&[&key]).await;
+        let token = key.token(&claims());
+        let mut parts: Vec<&str> = token.split('.').collect();
+        let forged = encode(&with("sub", json!("admin")));
+        parts[1] = &forged;
+        assert_refused(&verifier, &parts.join("."), "tampered payload").await;
+    }
 }
