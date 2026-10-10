@@ -1,3 +1,5 @@
+//! Cross-site request forgery protection: a custom header on every state-changing request.
+
 use axum::{
     extract::Request,
     http::{Method, StatusCode},
@@ -5,9 +7,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+/// Header every state-changing request must send with value `1`. Browsers only let
+/// cross-site pages send custom headers after a CORS preflight, which the BFF never grants.
 pub const CSRF_HEADER: &str = "x-bff-csrf";
+/// Paths called server-to-server rather than by the browser, so without the header.
 const EXEMPT_PATHS: &[&str] = &["/auth/backchannel-logout"];
 
+/// Middleware: refuses `request` with 403 if it changes state without the CSRF header,
+/// otherwise passes it to `next`.
 pub async fn require_header(request: Request, next: Next) -> Response {
     let safe = matches!(
         *request.method(),

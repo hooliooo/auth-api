@@ -18,9 +18,15 @@ pub async fn get_server_address() -> SocketAddr {
             let audience = "authentication.layer.api".to_string();
 
             tokio::spawn(async move {
-                rest_api::run(listener, &oauth2_url, &database_url, &audience)
-                    .await
-                    .unwrap();
+                rest_api::run(
+                    listener,
+                    &oauth2_url,
+                    &database_url,
+                    &audience,
+                    rest_api::Transport::AllowInsecureHttp,
+                )
+                .await
+                .unwrap();
             });
 
             addr

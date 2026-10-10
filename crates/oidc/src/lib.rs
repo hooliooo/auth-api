@@ -1,12 +1,17 @@
-//! Implements the core's authentication port against an OpenID Connect provider.
+//! Verifies tokens from an OpenID Connect provider.
 //!
-//! [`oidc`] holds what every OIDC provider shares: discovery, JWKS signature checks and the
-//! standard validations. Each provider adds only how its claims are read, e.g. [`keycloak`].
+//! - [`oidc`]: discovery, signature checks against the provider's published keys, and the
+//!   standard claim validations. Providers differ only in how claims are read
+//!   ([`ProviderClaims`]).
+//! - [`logout`]: the extra checks for back-channel logout tokens.
+#![warn(missing_docs)]
+#![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 mod cache;
 pub mod logout;
 pub mod oidc;
 
 pub use oidc::{
-    OidcJwtVerifier, OidcSetupError, ProviderClaims, WellKnownEndpoint, WellKnownEndpointError,
+    OidcJwtVerifier, OidcSetupError, ProviderClaims, Transport, WellKnownEndpoint,
+    WellKnownEndpointError,
 };

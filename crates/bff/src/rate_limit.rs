@@ -6,10 +6,11 @@ use redis::aio::ConnectionManager;
 
 use crate::{error::AppError, session::now};
 
+/// Length of one counting window.
 const WINDOW_SECS: u64 = 60;
 
-/// Counts one sign-in start for this client and refuses once it exceeds `per_minute` in the
-/// current minute. `per_minute == 0` turns the limit off.
+/// Counts one sign-in start for `client` in `redis` and refuses once it exceeds `per_minute`
+/// in the current minute. `per_minute == 0` turns the limit off.
 pub async fn check_login(
     redis: &mut ConnectionManager,
     client: IpAddr,

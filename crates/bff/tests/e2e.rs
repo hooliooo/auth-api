@@ -1,3 +1,4 @@
+//! End-to-end tests against the test stack (`docker-compose.test.yml`); see the README.
 #![cfg(feature = "e2e")]
 
 mod support;
@@ -9,11 +10,13 @@ use reqwest::{Method, StatusCode, header::CACHE_CONTROL};
 use serde_json::Value;
 
 use crate::support::{
-    Browser, bff, end_keycloak_session, eventually, hash_key, index_members, location, login_url,
-    open_sealed, query_param, read_session, redis, set_cookie, sign_in, sign_in_until_callback,
-    wait_for_bff, write_session,
+    Browser, arm_keycloak_fault, bff, end_keycloak_session, eventually, hash_key, index_members,
+    keycloak_refresh_status, location, login_cookie_name, login_url, now, open_sealed, query_param,
+    read_session, recorded_logout_tokens, redis, set_backchannel_logout_url, set_cookie, sign_in,
+    sign_in_until_callback, unverified_payload, wait_for_bff, write_session,
 };
 
+/// Asserts `response` forbids caching; `what` names it in the failure.
 fn assert_no_store(response: &reqwest::Response, what: &str) {
     assert_eq!(
         response
@@ -25,7 +28,7 @@ fn assert_no_store(response: &reqwest::Response, what: &str) {
     );
 }
 
-/// The Keycloak session id stored in a BFF session.
+/// The Keycloak session id stored in BFF session `sid`.
 async fn keycloak_sid(sid: &str) -> String {
     read_session(sid).await.expect("session exists")["sid"]
         .as_str()
@@ -33,6 +36,7 @@ async fn keycloak_sid(sid: &str) -> String {
         .to_owned()
 }
 
+/// The decrypted pending sign-in for `state`, if any, and its remaining TTL.
 async fn pending_login(state: &str) -> (Option<Value>, i64) {
     let mut redis = redis().await;
     let key = format!("bff:login:{}", hash_key(state));
@@ -46,6 +50,7 @@ async fn pending_login(state: &str) -> (Option<Value>, i64) {
     (pending, ttl)
 }
 
+/// The stored, still encrypted, session `sid`.
 async fn raw_session(sid: &str) -> Option<Vec<u8>> {
     let mut redis = redis().await;
     redis
@@ -54,6 +59,7 @@ async fn raw_session(sid: &str) -> Option<Vec<u8>> {
         .unwrap()
 }
 
+/// Seconds until session `sid` expires; `-2` if it does not exist.
 async fn session_ttl(sid: &str) -> i64 {
     let mut redis = redis().await;
     redis
@@ -100,11 +106,9 @@ async fn given_a_login_request_when_handled_then_it_redirects_to_keycloak_with_p
 
     assert!(query_param(&authorize, "nonce").is_some());
     let state = query_param(&authorize, "state").expect("state should exist");
-    let cookie = set_cookie(&response, "__Host-bff-login").expect("there should be a bff cookie");
-    assert!(
-        cookie.starts_with(&format!("__Host-bff-login={state};")),
-        "{cookie}"
-    );
+    let name = login_cookie_name(&state);
+    let cookie = set_cookie(&response, &name).expect("there should be a login cookie");
+    assert!(cookie.starts_with(&format!("{name}={state};")), "{cookie}");
     let lower = cookie.to_ascii_lowercase();
     for attribute in [
         "httponly",
@@ -174,7 +178,7 @@ async fn given_valid_credentials_when_logging_in_then_it_should_succeed_with_a_s
         "the cookie lives for the 24 h cap, not the 1 h idle timeout: {session_cookie}"
     );
     assert!(
-        browser.cookie("__Host-bff-login").is_none(),
+        !browser.has_cookie_starting_with("__Host-bff-login"),
         "login cookie should be cleared"
     );
 
@@ -198,7 +202,8 @@ async fn given_a_used_callback_when_replayed_then_it_should_be_rejected() {
     let mut browser = Browser::new();
 
     let callback = sign_in_until_callback(&mut browser, "/").await;
-    let login_cookie = browser.cookie("__Host-bff-login").unwrap().to_owned();
+    let cookie_name = login_cookie_name(&query_param(&callback, "state").unwrap());
+    let login_cookie = browser.cookie(&cookie_name).unwrap().to_owned();
     assert_eq!(
         browser.get(callback.as_str()).await.status(),
         StatusCode::SEE_OTHER
@@ -209,12 +214,12 @@ async fn given_a_used_callback_when_replayed_then_it_should_be_rejected() {
         .build()
         .unwrap()
         .get(callback.as_str())
-        .header("cookie", format!("__Host-bff-login={login_cookie}"))
+        .header("cookie", format!("{cookie_name}={login_cookie}"))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_login_failed(&response);
 }
 
 #[tokio::test]
@@ -226,10 +231,7 @@ async fn given_another_browser_when_it_opens_the_callback_then_it_should_be_reje
 
     let mut other = Browser::new();
 
-    assert_eq!(
-        other.get(callback.as_str()).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
+    assert_login_failed(&other.get(callback.as_str()).await);
 
     assert_eq!(
         browser.get(callback.as_str()).await.status(),
@@ -250,10 +252,16 @@ async fn given_a_tampered_state_when_calling_back_then_it_should_be_rejected() {
         .append_pair("code", &code)
         .append_pair("state", "tampered");
 
-    assert_eq!(
-        browser.get(callback.as_str()).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
+    assert_login_failed(&browser.get(callback.as_str()).await);
+}
+
+/// Asserts `response` is a failed sign-in: a redirect to the app with an error marker.
+fn assert_login_failed(response: &reqwest::Response) {
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let target = location(response);
+    assert_eq!(target.path(), "/");
+    assert_eq!(query_param(&target, "login_error").as_deref(), Some("1"));
+    assert_no_store(response, "a failed sign-in");
 }
 
 #[tokio::test]
@@ -331,6 +339,10 @@ async fn given_a_session_when_logging_out_then_it_ends_and_keycloak_logout_is_re
     let sid = browser.cookie("__Host-bff").unwrap().to_owned();
     let keycloak_sid = keycloak_sid(&sid).await;
     assert!(index_members(&keycloak_sid).await.contains(&hash_key(&sid)));
+    let refresh_token = read_session(&sid).await.unwrap()["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let response = browser
         .post(bff("/auth/logout").as_str(), &[("x-bff-csrf", "1")])
@@ -357,6 +369,11 @@ async fn given_a_session_when_logging_out_then_it_ends_and_keycloak_logout_is_re
     assert!(
         !index_members(&keycloak_sid).await.contains(&hash_key(&sid)),
         "the session leaves the back-channel index"
+    );
+    assert_eq!(
+        keycloak_refresh_status(&refresh_token).await,
+        StatusCode::BAD_REQUEST,
+        "logout revoked the refresh token at Keycloak"
     );
     let session_response = browser.get(bff("/auth/session").as_str()).await;
     assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
@@ -629,4 +646,169 @@ async fn given_a_slow_streamed_response_when_proxied_then_it_is_not_cut_off() {
 
     assert_eq!(body.lines().count(), 12, "{body}");
     assert!(started.elapsed().as_secs() >= 11);
+}
+
+#[tokio::test]
+async fn given_a_session_older_than_the_24_hour_cap_then_it_ends_even_when_active() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let mut session = read_session(&sid).await.unwrap();
+    session["created_at"] = (now() - 24 * 3_600 - 1).into();
+    write_session(&sid, &session).await;
+
+    let response = browser.get(bff("/auth/session").as_str()).await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        raw_session(&sid).await.is_none(),
+        "the expired session is deleted"
+    );
+}
+
+#[tokio::test]
+async fn given_an_active_session_then_each_request_restarts_the_idle_timeout() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let mut redis = redis().await;
+    let _: () = redis
+        .expire(format!("bff:session:{}", hash_key(&sid)), 100)
+        .await
+        .unwrap();
+
+    let response = browser.get(bff("/auth/session").as_str()).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let ttl = session_ttl(&sid).await;
+    assert!(ttl > 3_500, "the idle timeout restarted: ttl {ttl}");
+}
+
+#[tokio::test]
+async fn given_keycloak_fails_during_a_refresh_then_the_session_survives_and_recovers() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let mut session = read_session(&sid).await.unwrap();
+    let refresh_token = session["refresh_token"].as_str().unwrap().to_owned();
+    session["expires_at"] = 0.into();
+    write_session(&sid, &session).await;
+    arm_keycloak_fault(&refresh_token, 503).await;
+
+    let failed = browser
+        .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
+        .await;
+
+    assert!(failed.status().is_server_error(), "{}", failed.status());
+    let kept = read_session(&sid).await.expect("the session is kept");
+    assert_eq!(kept["refresh_token"], refresh_token.as_str());
+
+    let recovered = browser
+        .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
+        .await;
+    assert_eq!(
+        recovered.status(),
+        StatusCode::OK,
+        "the next request refreshes"
+    );
+}
+
+#[tokio::test]
+async fn given_a_logout_token_when_it_is_replayed_then_it_is_refused() {
+    wait_for_bff().await;
+    // Route Keycloak's back-channel logouts through the recorder, which passes them on to the
+    // BFF, so this test can see the real token. Other tests' logouts keep working meanwhile.
+    let previous =
+        set_backchannel_logout_url("http://echo-api:8000/relay/backchannel-logout").await;
+    let captured = tokio::spawn(async {
+        let mut browser = Browser::new();
+        sign_in(&mut browser, "/").await;
+        let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+        let keycloak_sid = keycloak_sid(&sid).await;
+        end_keycloak_session(&keycloak_sid).await;
+        eventually("the first delivery ended the session", || async {
+            raw_session(&sid).await.is_none()
+        })
+        .await;
+        recorded_logout_tokens()
+            .await
+            .into_iter()
+            .find(|token| unverified_payload(token)["sid"] == keycloak_sid.as_str())
+            .expect("the recorder saw this session's logout token")
+    })
+    .await;
+    // Restore before anything can fail, so a broken run does not leave Keycloak re-pointed.
+    set_backchannel_logout_url(&previous).await;
+    let logout_token =
+        captured.unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()));
+
+    let replayed = reqwest::Client::new()
+        .post(bff("/auth/backchannel-logout"))
+        .form(&[("logout_token", logout_token.as_str())])
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        replayed.status().is_client_error(),
+        "a logout token is accepted once: {}",
+        replayed.status()
+    );
+}
+
+#[tokio::test]
+async fn given_two_sign_ins_started_in_one_browser_then_both_complete() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    let first = sign_in_until_callback(&mut browser, "/first").await;
+    let second = sign_in_until_callback(&mut browser, "/second").await;
+
+    let finished_first = browser.get(first.as_str()).await;
+    assert_eq!(finished_first.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&finished_first).path(), "/first");
+
+    let finished_second = browser.get(second.as_str()).await;
+    assert_eq!(finished_second.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&finished_second).path(), "/second");
+}
+
+#[tokio::test]
+async fn given_any_request_then_it_carries_a_request_id_through_to_the_api() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    let health = browser.get(bff("/health").as_str()).await;
+    assert!(health.headers().get("x-request-id").is_some());
+
+    sign_in(&mut browser, "/").await;
+    let response = browser
+        .request(
+            Method::GET,
+            bff("/api/echo/orders").as_str(),
+            &[("x-request-id", "trace-from-cloudflare-123")],
+            None,
+        )
+        .await;
+    assert_eq!(
+        response.headers()["x-request-id"],
+        "trace-from-cloudflare-123"
+    );
+    let echoed: Value = response.json().await.unwrap();
+    assert_eq!(
+        echoed["headers"]["x-request-id"],
+        "trace-from-cloudflare-123"
+    );
+
+    let replaced = browser
+        .request(
+            Method::GET,
+            bff("/auth/session").as_str(),
+            &[("x-request-id", "not an id")],
+            None,
+        )
+        .await;
+    let id = replaced.headers()["x-request-id"].to_str().unwrap();
+    assert_ne!(id, "not an id", "text that is not an id is replaced");
 }

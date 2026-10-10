@@ -15,3 +15,6 @@ pub mod server;
 
 pub use app::AppState;
 pub use server::run;
+
+/// Whether the identity provider may be reached over plain HTTP; see [`oidc::Transport`].
+pub use oidc::Transport;

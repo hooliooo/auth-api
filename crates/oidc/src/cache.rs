@@ -25,10 +25,13 @@ use crate::oidc::JwtVerificationError;
 /// Why the key set could not be fetched.
 #[derive(Debug, Error)]
 pub enum SourceError {
+    /// The connection failed.
     #[error("Could not reach the JWKS endpoint: {0}")]
     Unreachable(String),
+    /// The endpoint answered with an error status.
     #[error("The JWKS endpoint returned an error: {0}")]
     ErrorStatus(String),
+    /// The body is not a key set.
     #[error("The JWKS endpoint did not return a key set: {0}")]
     Malformed(String),
 }
@@ -37,17 +40,21 @@ pub enum SourceError {
 /// HTTP.
 #[async_trait]
 pub trait JwksSource: std::fmt::Debug + Send + Sync {
+    /// The current key set.
     async fn fetch(&self) -> Result<JwkSet, SourceError>;
 }
 
 /// Fetches the JWKS from the provider's `jwks_uri`.
 #[derive(Debug)]
 pub struct HttpJwksSource {
+    /// Client the key set is fetched with.
     client: reqwest::Client,
+    /// The provider's `jwks_uri`.
     jwks_uri: String,
 }
 
 impl HttpJwksSource {
+    /// Fetches from `jwks_uri` with `client`.
     pub fn new(client: Client, jwks_uri: String) -> Self {
         Self { client, jwks_uri }
     }
@@ -72,20 +79,24 @@ impl JwksSource for HttpJwksSource {
 /// A key that can verify signatures, and the one algorithm it may be used with.
 #[derive(Debug)]
 pub struct SigningKey {
+    /// The public key.
     pub key: DecodingKey,
+    /// The only algorithm tokens signed with this key may use.
     pub algorithm: Algorithm,
 }
 
 /// One fetched key set, keyed by key id. Replaced as a whole on every refresh.
 #[derive(Debug)]
 struct Keys {
+    /// Usable signing keys by key id.
     by_kid: HashMap<String, Arc<SigningKey>>,
+    /// When the set was fetched; the TTL counts from here.
     fetched_at: Instant,
 }
 
 impl Keys {
-    /// Keeps the keys that can verify a signature and skips the rest, rather than rejecting
-    /// the whole set: a JWKS may also list encryption keys or algorithms this service ignores.
+    /// The usable signing keys of `set`, fetched at `fetched_at`. Other keys are skipped rather
+    /// than failing the whole set: a JWKS may also list encryption keys or other algorithms.
     fn from_set(set: &JwkSet, fetched_at: Instant) -> Self {
         let by_kid = set
             .keys
@@ -102,10 +113,9 @@ impl Keys {
     }
 }
 
-/// The algorithm a key signs with: its `alg` if it names one, otherwise the usual algorithm
-/// for its key type, since `alg` is optional and some providers omit it. `None` for keys that
-/// cannot be used, including symmetric ones: a secret in a public key set would let anyone who
-/// reads the set sign tokens.
+/// The algorithm `jwk` signs with: its `alg` if set, otherwise its key type's usual one.
+/// `None` for keys that cannot be used, including symmetric ones: a secret in a public key set
+/// would let anyone who reads it sign tokens.
 fn signing_algorithm(jwk: &Jwk) -> Option<Algorithm> {
     let algorithm = match (jwk.common.key_algorithm, &jwk.algorithm) {
         (_, AlgorithmParameters::OctetKey(_)) => return None,
@@ -130,6 +140,7 @@ fn signing_algorithm(jwk: &Jwk) -> Option<Algorithm> {
 /// The provider's signing keys, shared by every request of this instance.
 #[derive(Debug)]
 pub struct Cache {
+    /// Where keys are fetched from.
     source: Box<dyn JwksSource>,
     /// Read on every request; the guard is only held to clone the `Arc`.
     keys: RwLock<Arc<Keys>>,
@@ -143,7 +154,8 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// Loads the keys once; fails if the source cannot be reached at startup.
+    /// Loads the keys from `source`; they are refreshed once older than `ttl`, and fetched at
+    /// most once per `min_refresh_interval`. Fails if `source` cannot be reached.
     pub async fn new(
         source: impl JwksSource + 'static,
         ttl: Duration,
@@ -160,8 +172,8 @@ impl Cache {
         })
     }
 
-    /// The key that signed a token with this key id, refreshing the set first if the id is
-    /// unknown or the keys are older than the ttl.
+    /// The key with id `kid`, refreshing the set first if `kid` is unknown or the keys are
+    /// older than the TTL.
     pub async fn key(&self, kid: &str) -> Result<Arc<SigningKey>, JwtVerificationError> {
         let keys = self.snapshot();
         if keys.fetched_at.elapsed() < self.ttl
@@ -184,6 +196,7 @@ impl Cache {
         }
     }
 
+    /// The current key set, without holding the lock.
     fn snapshot(&self) -> Arc<Keys> {
         self.keys
             .read()
@@ -191,9 +204,9 @@ impl Cache {
             .clone()
     }
 
-    /// Refetches the keys unless another request just did, or the cooldown has not passed.
-    /// Returns the keys to use, which are the previous ones if the fetch failed, and the
-    /// failure if this call's fetch failed.
+    /// Refetches the keys unless another request replaced `seen` meanwhile or the cooldown has
+    /// not passed. Returns the keys to use (the previous ones if the fetch failed) and this
+    /// call's fetch failure, if any.
     async fn refresh(&self, seen: &Arc<Keys>) -> (Arc<Keys>, Option<SourceError>) {
         let mut last_refresh = self.last_refresh.lock().await;
 
@@ -240,7 +253,9 @@ mod tests {
         oidc::JwtVerificationError,
     };
 
+    /// Key TTL in the tests.
     const TTL: Duration = Duration::from_secs(600);
+    /// Refresh cooldown in the tests.
     const COOLDOWN: Duration = Duration::from_secs(30);
 
     /// Placeholder key material: valid base64url, but no real key. `DecodingKey::from_jwk`
@@ -248,21 +263,27 @@ mod tests {
     const MODULUS: &str =
         "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4_QA";
 
+    /// A placeholder RSA signing key with id `kid`.
     fn rsa_key(kid: &str) -> Value {
         json!({ "kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid, "n": MODULUS, "e": "AQAB" })
     }
 
+    /// A key set of `keys`.
     fn set_of(keys: Vec<Value>) -> JwkSet {
         serde_json::from_value(json!({ "keys": keys })).unwrap()
     }
 
+    /// A key set with one placeholder key per id in `kids`.
     fn key_set(kids: &[&str]) -> JwkSet {
         set_of(kids.iter().map(|kid| rsa_key(kid)).collect())
     }
 
+    /// A key source the test controls, counting fetches.
     #[derive(Debug)]
     struct TestSource {
+        /// What the next fetch returns; `None` fails it.
         response: Arc<Mutex<Option<JwkSet>>>,
+        /// How many fetches happened.
         fetches: Arc<AtomicUsize>,
     }
 
@@ -279,13 +300,18 @@ mod tests {
         }
     }
 
+    /// A cache over a [`TestSource`], with handles to control and observe it.
     struct CacheTestState {
+        /// The cache under test.
         cache: Cache,
+        /// What the source's next fetch returns.
         response: Arc<Mutex<Option<JwkSet>>>,
+        /// How many fetches the source served.
         fetches: Arc<AtomicUsize>,
     }
 
     impl CacheTestState {
+        /// A cache loaded with placeholder keys `kids`.
         async fn new(kids: &[&str]) -> Self {
             let response = Arc::new(Mutex::new(Some(key_set(kids))));
             let fetches = Arc::new(AtomicUsize::new(0));
@@ -301,10 +327,12 @@ mod tests {
             }
         }
 
+        /// Makes the next fetches return `set`, or fail if `None`.
         fn serve(&self, set: Option<JwkSet>) {
             *self.response.lock().unwrap() = set
         }
 
+        /// How many fetches happened so far.
         fn fetches(&self) -> usize {
             self.fetches.load(Ordering::SeqCst)
         }

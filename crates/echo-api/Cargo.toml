@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# A stand-in API for the BFF's e2e tests: reports what the proxy forwarded and streams slowly.
+# Test-only helpers for the BFF's e2e tests: a stand-in API, a fault-injecting proxy in front of
+# Keycloak, and a recorder for Keycloak's back-channel logout calls.
 [dependencies]
 axum         = { workspace = true }
 futures-util = "0.3"
+reqwest      = { workspace = true }
 serde_json   = { workspace = true }
 tokio        = { workspace = true }

@@ -3,7 +3,7 @@ name    = "oidc"
 version = "0.1.0"
 edition = "2024"
 
-# Tests against the docker/ Keycloak only run with `--features e2e`
+# Tests against the dev stack's Keycloak only run with `--features e2e`
 [features]
 e2e = []
 

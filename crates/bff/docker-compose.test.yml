@@ -1,0 +1,30 @@
+# The e2e test stack: the dev stack plus test helpers. From the workspace root:
+#   docker compose -f crates/bff/docker-compose.yml -f crates/bff/docker-compose.test.yml up -d --build
+#   cargo test -p bff --test e2e
+services:
+  # Stand-in API, fault-injecting Keycloak proxy and back-channel logout recorder.
+  echo-api:
+    build:
+      context: ../..
+      dockerfile: crates/echo-api/Dockerfile
+    container_name: bff-echo-api
+    # Reached by the tests for faults and recorded logout tokens (E2E_HELPERS_URL).
+    ports:
+      - "5199:8000"
+    environment:
+      KEYCLOAK_URL: http://keycloak-api:8080
+      BACKCHANNEL_TARGET: http://bff:5100/auth/backchannel-logout
+  bff:
+    environment:
+      API_BASE_URL: http://echo-api:8000
+      # Server-to-server Keycloak calls go through the proxy, so tests can make them fail.
+      DISCOVERY_URI: http://echo-api:8081/realms/test
+      # As behind Cloudflare: the tests send each simulated browser's address in this header.
+      CLIENT_IP_HEADER: cf-connecting-ip
+      # The tests connect from the host, whose address varies by platform: trust everything.
+      # In production this is the proxy's own range, e.g. the pod network cloudflared runs in.
+      TRUSTED_PROXIES: 0.0.0.0/0,::/0
+      LOGIN_RATE_LIMIT_PER_MINUTE: "10"
+    depends_on:
+      echo-api:
+        condition: service_started

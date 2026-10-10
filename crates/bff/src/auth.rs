@@ -1,3 +1,5 @@
+//! Sign-in, callback, logout, back-channel logout and the session endpoint.
+
 use axum::Form;
 use axum::Json;
 use axum::http::header::REFERRER_POLICY;
@@ -24,11 +26,11 @@ use std::net::SocketAddr;
 #[cfg(feature = "rate-limit")]
 use axum::extract::ConnectInfo;
 
+#[cfg(feature = "rate-limit")]
+use crate::rate_limit;
 use crate::sealed;
 use crate::sealed::Purpose;
 use crate::session::CurrentSession;
-#[cfg(feature = "rate-limit")]
-use crate::{client_ip::client_ip, rate_limit};
 use crate::{
     cookie,
     crypto::{constant_time_eq, hash_key},
@@ -39,14 +41,18 @@ use crate::{
     state::AppState,
 };
 
+/// How long a started sign-in may take before it must start over.
 const LOGIN_TTL_SECS: u64 = 300;
 /// How old a back-channel logout token may be; older ones are refused even before they expire.
 const LOGOUT_TOKEN_MAX_AGE_SECS: u64 = 120;
 /// How long a logout token's `jti` is remembered: past this, its `iat` is too old anyway.
 const LOGOUT_JTI_TTL_SECS: u64 = LOGOUT_TOKEN_MAX_AGE_SECS + 2 * oidc::oidc::LEEWAY_SECS;
+/// Where the browser lands when a sign-in cannot be completed; the SPA shows the message.
+const LOGIN_FAILED_PATH: &str = "/?login_error=1";
 /// Keycloak's `typ` for ID tokens.
 const ID_TOKEN_TYPE: &str = "ID";
 
+/// The `/auth/*` routes.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/auth/login", get(login))
@@ -56,36 +62,52 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/session", get(current))
 }
 
+/// Why a sign-in, logout or token check failed.
 #[derive(Debug, Error)]
 pub enum LoginError {
+    /// The identity provider did not exchange the code for tokens.
     #[error("Code exchange error: '{0}'")]
     CodeExchangeError(String),
+    /// The login cookie is missing or unusable.
     #[error("Cookie error: '{0}'")]
     CookieError(String),
+    /// The discovered authorization endpoint is not a URL.
     #[error("Invalid authorization_endpoint: '{0}'")]
     InvalidAuthorizationEndpoint(String),
+    /// The logout token was already used.
     #[error("Invalid backchannel logout token")]
     InvalidBackchannelLogoutToken,
+    /// The ID token is not one this client may accept.
     #[error("Invalid ID token: {0}")]
     InvalidIdToken(&'static str),
+    /// The callback has no `code` or no `state`.
     #[error("Missing code or state")]
     InvalidCallbackQuery,
+    /// The ID token's nonce does not match the sign-in's.
     #[error("Invalid nonce")]
     InvalidNonce,
+    /// The sign-in expired, was already completed, or does not open.
     #[error("Pending login expired or already used")]
     InvalidPendingLogin,
+    /// The configured redirect URI is not a URL.
     #[error("Invalid redirect_uri: '{0}'")]
     InvalidRedirectUri(String),
+    /// The callback's `state` does not match the login cookie.
     #[error("state mismatch with state from cookie")]
     InvalidStateParam,
+    /// A token failed verification.
     #[error(transparent)]
     JwtVerificationError(JwtVerificationError),
+    /// A logout token names no session.
     #[error("Missing sid")]
     MissingSid,
+    /// A PKCE value is malformed.
     #[error("PkceError: {0}")]
     PkceError(PkceError),
+    /// The random source failed.
     #[error("Could not generate random values")]
     RandomError(RandomUnvailable),
+    /// The identity provider reported a sign-in error.
     #[error("IAM rejected sign-in")]
     SignIn,
 }
@@ -102,43 +124,65 @@ impl From<PkceError> for LoginError {
     }
 }
 
+/// Query of `GET /auth/login`.
 #[derive(Debug, Deserialize)]
 struct LoginQuery {
+    /// `returnUrl`: where to go after signing in; only same-origin paths are kept.
     #[serde(rename = "returnUrl")]
     pub return_url: Option<String>,
 }
 
+/// A sign-in in progress, sealed in Redis under its `state`.
 #[derive(Debug, Deserialize, Serialize)]
 struct PendingLogin {
+    /// The PKCE verifier, sent with the code exchange.
     pub verifier: CodeVerifier,
+    /// The nonce the ID token must carry.
     pub nonce: String,
+    /// Where to send the browser afterwards; a path on this origin.
     pub return_to: String,
 }
 
+/// Query of `GET /auth/callback`, as the identity provider sends it.
 #[derive(Debug, Deserialize)]
 struct CallbackQuery {
+    /// The authorization code, on success.
     code: Option<String>,
+    /// The `state` the sign-in started with.
     state: Option<String>,
+    /// The provider's error code, on failure.
     error: Option<String>,
+    /// The provider's error text, on failure.
     error_description: Option<String>,
 }
 
+/// The token endpoint's answer to a code exchange.
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
+    /// Bearer token for the API.
     access_token: String,
+    /// Seconds until `access_token` expires.
     expires_in: u64,
+    /// Who signed in; also the hint for logout.
     id_token: String,
+    /// Renews `access_token`; absent if the client may not refresh.
     refresh_token: Option<String>,
 }
 
+/// The ID token claims the BFF checks or keeps.
 #[derive(Debug, Deserialize)]
 struct IdTokenClaims {
+    /// The user's id.
     sub: String,
+    /// Must match the sign-in's nonce.
     nonce: Option<String>,
+    /// Keycloak's token type; must be `ID`.
     typ: Option<String>,
+    /// The client the token was issued to, if named.
     azp: Option<String>,
     /// A single string or a list (OIDC Core §2).
     aud: Value,
+    /// `sid`: the provider session, for back-channel logout.
     #[serde(rename = "sid")]
     iam_sid: Option<String>,
     // preferred_username: Option<String>,
@@ -146,6 +190,8 @@ struct IdTokenClaims {
     // email: Option<String>,
 }
 
+/// `url` resolved against `base` if it stays on `base`'s origin, as path, query and
+/// fragment; `/` otherwise.
 fn sanitize_return_url(url: Option<&str>, base: &Url) -> String {
     let Some(u) = url else { return "/".into() };
     match base.join(u) {
@@ -166,10 +212,14 @@ fn sanitize_return_url(url: Option<&str>, base: &Url) -> String {
     }
 }
 
+/// Redis key of the pending sign-in for `state`.
 fn login_key(state: &str) -> String {
     format!("bff:login:{}", hash_key(state))
 }
 
+/// Starts a sign-in: stores a sealed [`PendingLogin`], sets the login cookie and redirects to
+/// the identity provider. `s` is the app state, `q` the query; with the `rate-limit` feature,
+/// `peer` and `request_headers` give the client address being limited.
 async fn login(
     State(s): State<AppState>,
     #[cfg(feature = "rate-limit")] ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -179,7 +229,7 @@ async fn login(
     // Every sign-in start writes to Redis without a session, so it is limited per client.
     #[cfg(feature = "rate-limit")]
     {
-        let client = client_ip(&request_headers, peer, s.client_ip_header.as_ref());
+        let client = s.client_ip.client_ip(&request_headers, peer);
         rate_limit::check_login(&mut s.redis.clone(), client, s.login_per_minute).await?;
     }
 
@@ -232,15 +282,40 @@ async fn login(
     let mut response = Redirect::to(url.as_str()).into_response();
     response.headers_mut().append(
         SET_COOKIE,
-        cookie::set(cookie::LOGIN, &state, "Lax", LOGIN_TTL_SECS)?,
+        cookie::set(&cookie::login_cookie(&state), &state, "Lax", LOGIN_TTL_SECS)?,
     );
     Ok(response)
 }
 
+/// `GET /auth/callback` with query `q`: completes the sign-in using `state` (the app state) and
+/// the request's `headers`. On any failure, sends the browser to the app with an error marker
+/// instead of a bare status page, and drops this sign-in's login cookie.
 async fn callback(
-    State(s): State<AppState>,
+    state: State<AppState>,
     headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
+) -> Response {
+    let login_cookie = q.state.as_deref().map(cookie::login_cookie);
+    match complete_sign_in(state, headers, q).await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(%error, "sign-in could not be completed");
+            let mut response = Redirect::to(LOGIN_FAILED_PATH).into_response();
+            if let Some(Ok(clear)) = login_cookie.map(|name| cookie::clear(&name, "Lax")) {
+                response.headers_mut().append(SET_COOKIE, clear);
+            }
+            no_store(response)
+        }
+    }
+}
+
+/// Finishes the sign-in for callback query `q`: checks `state` against the login cookie in
+/// `headers`, redeems the pending sign-in, exchanges the code, checks the ID token, and starts
+/// a session. `s` is the app state.
+async fn complete_sign_in(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    q: CallbackQuery,
 ) -> Result<Response, AppError> {
     if let Some(error) = q.error.as_deref() {
         warn!(error, description = ?q.error_description, "IAM rejected sign-in");
@@ -252,7 +327,7 @@ async fn callback(
         .zip(q.state)
         .ok_or(LoginError::InvalidCallbackQuery)?;
 
-    let state_from_cookie = cookie::get(&headers, cookie::LOGIN)
+    let state_from_cookie = cookie::get(&headers, &cookie::login_cookie(&state))
         .ok_or(LoginError::CookieError("missing cookie".to_owned()))?;
 
     if !constant_time_eq(&state, &state_from_cookie) {
@@ -312,11 +387,15 @@ async fn callback(
         SET_COOKIE,
         cookie::set(cookie::SESSION, &sid, "Strict", SSO_MAX_SECS)?,
     );
-    headers.append(SET_COOKIE, cookie::clear(cookie::LOGIN, "Lax")?);
+    headers.append(
+        SET_COOKIE,
+        cookie::clear(&cookie::login_cookie(&state), "Lax")?,
+    );
     headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     Ok(no_store(response))
 }
 
+/// Exchanges `code` with its PKCE `verifier` for tokens at `app_state`'s token endpoint.
 async fn exchange_code(
     app_state: &AppState,
     code: &str,
@@ -350,12 +429,16 @@ async fn exchange_code(
     Ok(result)
 }
 
+/// Body of `POST /auth/logout`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LogoutResponse {
+    /// Where the SPA navigates to sign out of the identity provider too.
     logout_url: String,
 }
 
+/// Ends `current_session`, revokes its refresh token and returns the provider's logout URL.
+/// `app_state` has Redis and the provider.
 async fn logout(
     State(app_state): State<AppState>,
     current_session: CurrentSession,
@@ -391,6 +474,8 @@ async fn logout(
     Ok(no_store(response))
 }
 
+/// Revokes `refresh_token` at `app_state`'s provider; failures are only logged, since the
+/// session is already gone.
 async fn revoke_best_effort(app_state: &AppState, refresh_token: &str) {
     let result = app_state
         .http
@@ -410,11 +495,15 @@ async fn revoke_best_effort(app_state: &AppState, refresh_token: &str) {
     }
 }
 
+/// Body of `POST /auth/backchannel-logout`.
 #[derive(Deserialize)]
 struct LogoutTokenForm {
+    /// The provider's signed logout token.
     logout_token: String,
 }
 
+/// Ends every session of the provider session named in `form`'s logout token, once per
+/// token. `app_state` has Redis and the verifier.
 async fn backchannel_logout(
     State(app_state): State<AppState>,
     Form(form): Form<LogoutTokenForm>,
@@ -450,12 +539,15 @@ async fn backchannel_logout(
     Ok(StatusCode::OK)
 }
 
+/// Body of `GET /auth/session`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionInfo {
+    /// The user's id.
     sub: String,
 }
 
+/// Marks `response` as never to be cached: it carries session data.
 fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()
@@ -463,13 +555,15 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
+/// Who is signed in, from `current`; 401 without a session.
 async fn current(current: CurrentSession) -> Response {
     let s = current.session;
     no_store(Json(SessionInfo { sub: s.sub }).into_response())
 }
 
 /// The ID token checks OIDC Core §3.1.3.7 adds to signature, issuer, audience and expiry:
-/// it must be an ID token, and if it names an authorized party, that must be this client.
+/// `claims` must be an ID token's, and if they name an authorized party, it must be
+/// `client_id`.
 fn check_id_token(claims: &IdTokenClaims, client_id: &str) -> Result<(), LoginError> {
     if claims.typ.as_deref() != Some(ID_TOKEN_TYPE) {
         return Err(LoginError::InvalidIdToken("not an ID token"));
@@ -493,6 +587,7 @@ mod tests {
 
     use super::*;
 
+    /// Valid ID token claims for client `bff`, changed by `extra`; a `null` removes a claim.
     fn id_token(extra: Value) -> IdTokenClaims {
         let mut claims = json!({ "sub": "user", "typ": "ID", "aud": "bff", "azp": "bff" });
         for (key, value) in extra.as_object().unwrap() {

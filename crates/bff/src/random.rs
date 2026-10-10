@@ -4,6 +4,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::rand::{SecureRandom, SystemRandom};
 use thiserror::Error;
 
+/// The operating system's random source failed.
 #[derive(Debug, Error)]
 #[error("Could not generate random")]
 pub struct RandomUnvailable;

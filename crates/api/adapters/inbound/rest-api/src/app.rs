@@ -20,7 +20,7 @@ use tower_http::{
 use tracing::{Span, info_span};
 use write_model::database_setup;
 
-use crate::{auth::JwtVerifierState, health, organization};
+use crate::{Transport, auth::JwtVerifierState, health, organization};
 
 /// The state every router shares. Dependencies used across resources, like the JWT verifier,
 /// live here once; each resource's handlers pull their own slice out with `FromRef`.
@@ -49,8 +49,13 @@ impl JwtVerifierState for AppState {
 }
 
 /// Builds the dependencies and returns the application, ready to serve.
-pub async fn build(oauth2_url: &str, database_url: &str, audience: &str) -> Router {
-    let state = build_state(oauth2_url, database_url, audience).await;
+pub async fn build(
+    oauth2_url: &str,
+    database_url: &str,
+    audience: &str,
+    transport: Transport,
+) -> Router {
+    let state = build_state(oauth2_url, database_url, audience, transport).await;
     router(state)
 }
 
@@ -108,7 +113,12 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Configures every dependency and settles all configuration.
-async fn build_state(oauth2_url: &str, database_url: &str, audience: &str) -> AppState {
+async fn build_state(
+    oauth2_url: &str,
+    database_url: &str,
+    audience: &str,
+    transport: Transport,
+) -> AppState {
     // Keycloak is called while verifying tokens, so a hung Keycloak must fail those requests
     // instead of holding them open.
     let client = reqwest::Client::builder()
@@ -116,9 +126,10 @@ async fn build_state(oauth2_url: &str, database_url: &str, audience: &str) -> Ap
         .timeout(Duration::from_secs(5))
         .build()
         .expect("Failed to build the HTTP client");
-    let keycloak_jwt_verifier = KeycloakJwtVerifier::new(oauth2_url, client, audience.to_string())
-        .await
-        .expect("Failed to read the Keycloak well-known configuration");
+    let keycloak_jwt_verifier =
+        KeycloakJwtVerifier::new(oauth2_url, client, audience.to_string(), transport)
+            .await
+            .expect("Failed to read the Keycloak well-known configuration");
     let verifier = Arc::new(keycloak_jwt_verifier);
 
     let authorization_service = Arc::new(AuthAPIAuthorizationService);

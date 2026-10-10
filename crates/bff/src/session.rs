@@ -1,3 +1,5 @@
+//! Sessions in Redis: storage, the signed-in extractor and access-token refresh.
+
 use axum::extract::FromRequestParts;
 use core::fmt;
 use redis::{AsyncCommands, Script, aio::ConnectionManager};
@@ -15,11 +17,17 @@ use crate::{
     state::AppState,
 };
 
+/// A session ends after this long without a request; each request restarts the clock.
 pub const SSO_IDLE_SECS: u64 = 3_600;
+/// A session ends this long after sign-in, however active.
 pub const SSO_MAX_SECS: u64 = 24 * 3_600;
+/// Refresh the access token when it has less than this left.
 const REFRESH_ACCESS_TOKEN_AHEAD_SECS: u64 = 60;
+/// How long one instance may hold a session's refresh lock; longer than any refresh call.
 const REFRESH_LOCK_MILLIS: u64 = 30_000;
+/// How long a request waits for another instance's refresh before giving up.
 const REFRESH_LOCK_WAIT: Duration = Duration::from_secs(12);
+/// Total time allowed for one refresh call to the identity provider.
 const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Writes the session only if this caller still holds the refresh lock and the session still
@@ -34,14 +42,22 @@ const RELEASE_LOCK: &str = "\
 if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end \
 return 0";
 
+/// What the BFF keeps per signed-in browser, sealed in Redis under the session id.
 #[derive(Deserialize, Serialize)]
 pub struct Session {
+    /// The user's id.
     pub sub: String,
+    /// The identity provider's session id, for back-channel logout.
     pub sid: Option<String>,
+    /// The latest ID token; the hint for logout.
     pub id_token: String,
+    /// Bearer token for the API.
     pub access_token: String,
+    /// Renews `access_token`.
     pub refresh_token: Option<String>,
+    /// When `access_token` expires, in Unix seconds.
     pub expires_at: u64,
+    /// When the user signed in, in Unix seconds; the 24-hour cap counts from here.
     pub created_at: u64,
 }
 
@@ -53,23 +69,28 @@ impl fmt::Debug for Session {
     }
 }
 
+/// The current time in Unix seconds.
 pub fn now() -> u64 {
     let now = time::UtcDateTime::now();
     now.unix_timestamp() as u64
 }
 
+/// Redis key of the session whose hashed id is `hashed`.
 fn session_key(hashed: &str) -> String {
     format!("bff:session:{hashed}")
 }
 
+/// Redis key of the set of sessions belonging to provider session `iam_sid`.
 fn iam_index_key(iam_sid: &str) -> String {
     format!("bff:iam-sid:{iam_sid}")
 }
 
+/// Redis key of the refresh lock for session `sid`.
 fn lock_key(sid: &str) -> String {
     format!("bff:lock:{}", hash_key(sid))
 }
 
+/// `session` encrypted under session id `sid`.
 fn seal(sid: &str, session: &Session) -> Result<Vec<u8>, AppError> {
     Ok(sealed::seal(
         sid,
@@ -78,6 +99,8 @@ fn seal(sid: &str, session: &Session) -> Result<Vec<u8>, AppError> {
     )?)
 }
 
+/// The session `sid` from `redis`, restarting its idle timeout; `None` if it is missing, does
+/// not open, or is past the 24-hour cap (then it is deleted).
 pub async fn load(redis: &mut ConnectionManager, sid: &str) -> Result<Option<Session>, AppError> {
     let raw: Option<Vec<u8>> = redis::cmd("GETEX")
         .arg(session_key(&hash_key(sid)))
@@ -98,6 +121,7 @@ pub async fn load(redis: &mut ConnectionManager, sid: &str) -> Result<Option<Ses
     Ok(Some(session))
 }
 
+/// Stores `session` in `redis` under `sid` and adds it to its provider session's index.
 pub async fn save(
     redis: &mut ConnectionManager,
     sid: &str,
@@ -120,6 +144,7 @@ pub async fn save(
     Ok(())
 }
 
+/// Deletes session `sid` from `redis`, and from provider session `iam_sid`'s index if given.
 pub async fn delete(
     redis: &mut ConnectionManager,
     sid: &str,
@@ -135,6 +160,8 @@ pub async fn delete(
     Ok(())
 }
 
+/// Deletes from `redis` every session of provider session `sid` (back-channel logout);
+/// returns how many there were.
 pub async fn delete_by_iam_sid(
     redis: &mut ConnectionManager,
     sid: &str,
@@ -150,8 +177,11 @@ pub async fn delete_by_iam_sid(
     Ok(keys.len())
 }
 
+/// Extractor: the request's valid session, or 401.
 pub struct CurrentSession {
+    /// The session id, from the cookie.
     pub id: String,
+    /// The session itself.
     pub session: Session,
 }
 
@@ -169,13 +199,17 @@ impl FromRequestParts<AppState> for CurrentSession {
     }
 }
 
+/// A Redis lock so only one instance refreshes a session at a time.
 struct RefreshLock {
+    /// The lock's Redis key.
     key: String,
+    /// This holder's random token; only its holder may release the lock.
     token: String,
 }
 
 impl RefreshLock {
-    /// 'None' if another instance still holds the lock past REFRESH_LOCK_WAIT
+    /// Takes session `sid`'s refresh lock in `redis`, waiting up to [`REFRESH_LOCK_WAIT`];
+    /// `None` if another instance still holds it then.
     async fn acquire(redis: &mut ConnectionManager, sid: &str) -> Result<Option<Self>, AppError> {
         let lock = Self {
             key: lock_key(sid),
@@ -204,6 +238,7 @@ impl RefreshLock {
         Ok(None)
     }
 
+    /// Releases the lock in `redis` if it is still held by `self`; otherwise it expires on its own.
     async fn release(self, redis: &mut ConnectionManager) {
         let result: Result<i64, _> = Script::new(RELEASE_LOCK)
             .key(&self.key)
@@ -216,8 +251,8 @@ impl RefreshLock {
     }
 }
 
-/// Refreshes the access token for the current session if needed. 'None' means the session is gone
-/// or cannot be refreshed.
+/// An access token for `current_session` valid for at least a minute, refreshed through
+/// `app_state`'s provider if needed. `None` means the session is gone or cannot be refreshed.
 pub async fn refresh_access_token(
     app_state: &AppState,
     current_session: CurrentSession,
@@ -238,14 +273,22 @@ pub async fn refresh_access_token(
     result
 }
 
+/// The token endpoint's answer to a refresh.
 #[derive(Deserialize)]
 struct RefreshResponse {
+    /// The new access token.
     access_token: String,
+    /// A rotated refresh token, if the provider rotates them.
     refresh_token: Option<String>,
+    /// A new ID token, if the provider sends one.
     id_token: Option<String>,
+    /// Seconds until the new access token expires.
     expires_in: u64,
 }
 
+/// Refreshes session `sid`'s access token while holding `lock`, using `redis` and
+/// `app_state`'s provider. `None` if the session is gone or the provider rejects the refresh
+/// token (the session then ends); an error if the provider is unavailable (the session stays).
 async fn refresh_locked(
     app_state: &AppState,
     redis: &mut ConnectionManager,

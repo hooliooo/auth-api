@@ -1,3 +1,8 @@
+//! Backend-for-frontend: signs users in with an OpenID Connect provider, keeps their tokens in
+//! Redis behind an opaque session cookie, and forwards the SPA's API calls with a bearer token.
+//! Configuration and routes: see the crate's README.
+#![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
+
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{Router, middleware};
@@ -25,10 +30,12 @@ mod proxy;
 mod random;
 #[cfg(feature = "rate-limit")]
 mod rate_limit;
+mod request_id;
 mod sealed;
 mod session;
 mod state;
 
+/// Reads the settings, connects to the identity provider and Redis, and serves until shut down.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -60,13 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         oidc: Arc::new(oidc),
         redis,
         api_base_url: api_base_url.map(Arc::from),
-        client_ip_header: std::env::var("CLIENT_IP_HEADER")
-            .ok()
-            .map(|name| {
-                axum::http::HeaderName::try_from(name)
-                    .map_err(|_| StartupError::InvalidSetting("CLIENT_IP_HEADER"))
-            })
-            .transpose()?,
+        client_ip: client_ip::ClientIpSource::from_settings(
+            std::env::var("CLIENT_IP_HEADER").ok().as_deref(),
+            std::env::var("TRUSTED_PROXIES").ok().as_deref(),
+        )?,
         #[cfg(feature = "rate-limit")]
         login_per_minute: std::env::var("LOGIN_RATE_LIMIT_PER_MINUTE")
             .ok()
@@ -84,8 +88,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(proxy::routes())
         .merge(health::routes())
         .layer(middleware::from_fn(csrf::require_header))
+        // Outermost, so even requests the CSRF check refuses get an id.
+        .layer(middleware::from_fn(request_id::assign))
         .with_state(state);
-    let listener = TcpListener::bind("0.0.0.0:5100").await?;
+    let listen_addr: SocketAddr = std::env::var("LISTEN_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:5100".to_owned())
+        .parse()
+        .map_err(|_| StartupError::InvalidSetting("LISTEN_ADDR"))?;
+    let listener = TcpListener::bind(listen_addr).await?;
     info!("Listening on {}", listener.local_addr()?);
 
     // The peer address is the fallback client IP for rate limiting and X-Forwarded-For.
@@ -98,6 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Completes on Ctrl-C or SIGTERM (container stop, rollout), so in-flight requests can
+/// finish before the process exits.
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(error) = tokio::signal::ctrl_c().await {

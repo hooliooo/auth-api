@@ -21,8 +21,8 @@ pub struct LogoutClaims {
     pub exp: u64,
 }
 
-/// Validates the payload of a token whose signature, issuer, audience and expiry have already
-/// been verified. `max_age_secs` bounds how old `iat` may be, so a captured token cannot be
+/// Checks the `payload` of an already verified token as a logout token at time `now` (Unix
+/// seconds). `max_age_secs` bounds how old its `iat` may be, so a captured token cannot be
 /// replayed later even before it expires.
 pub fn logout_claims(
     payload: &Value,
@@ -83,9 +83,12 @@ mod tests {
 
     use super::*;
 
+    /// The tests' current time.
     const NOW: u64 = 1_800_000_000;
+    /// The tests' maximum logout token age.
     const MAX_AGE: u64 = 120;
 
+    /// A valid logout token payload.
     fn token() -> Value {
         json!({
             "iss": "https://idp.example/realms/test",
@@ -99,12 +102,14 @@ mod tests {
         })
     }
 
+    /// [`token`] without `claim`.
     fn without(claim: &str) -> Value {
         let mut payload = token();
         payload.as_object_mut().unwrap().remove(claim);
         payload
     }
 
+    /// [`token`] with `claim` set to `value`.
     fn with(claim: &str, value: Value) -> Value {
         let mut payload = token();
         payload[claim] = value;

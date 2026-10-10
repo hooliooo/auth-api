@@ -46,19 +46,50 @@ const ALGORITHMS: [Algorithm; 9] = [
     Algorithm::EdDSA,
 ];
 
+/// Which URL schemes the provider may use. Over plain HTTP anyone on the network path can
+/// swap the signing keys or read tokens, so HTTP is only for local development.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Transport {
+    /// Only `https://` provider URLs.
+    #[default]
+    HttpsOnly,
+    /// Accepts `http://` provider URLs, e.g. a Keycloak container in a dev stack.
+    AllowInsecureHttp,
+}
+
+impl Transport {
+    /// Refuses `url`, reported as `name`, unless it is HTTPS or this policy allows HTTP.
+    fn check(self, name: &'static str, url: &str) -> Result<(), OidcSetupError> {
+        let scheme = reqwest::Url::parse(url)
+            .map(|url| url.scheme().to_owned())
+            .unwrap_or_default();
+        match (scheme.as_str(), self) {
+            ("https", _) | ("http", Transport::AllowInsecureHttp) => Ok(()),
+            _ => Err(OidcSetupError::InsecureUrl {
+                name,
+                url: url.to_owned(),
+            }),
+        }
+    }
+}
+
 /// The claims this service acts on, read from a verified token.
 /// Values keep the provider's own format, e.g. `user_id` is whatever the provider uses as
 /// the subject.
 #[derive(Clone, Debug)]
 pub struct StandardClaims {
+    /// The client the token was issued to.
     pub azp: String,
+    /// The subject: the user, or the client for service accounts.
     pub sub: String,
 }
 
 /// Verifies a raw bearer token against an identity provider and reads its claims.
 #[async_trait::async_trait]
 pub trait JwtVerifier: Send + Sync {
+    /// What a verified token is read into.
     type Claims;
+    /// Verifies `raw_token` and reads its claims.
     async fn verify(&self, raw_token: &str) -> Result<Self::Claims, JwtVerificationError>;
 }
 
@@ -77,46 +108,52 @@ pub enum JwtVerificationError {
     MissingClaim(&'static str),
 }
 
-/// How a provider's token payload is read into the [`Claims`] this service acts on.
-///
-/// This is the only thing that differs between providers, so it is what
-/// [`OidcJwtVerifier`] is parameterised by.
+/// How a provider's token payload is read into the claims a service acts on: the only thing
+/// that differs between providers, so it is what [`OidcJwtVerifier`] is parameterised by.
 pub trait ProviderClaims {
+    /// What a verified payload is read into.
     type Claims;
+    /// Reads a verified token's `payload`.
     fn claims(payload: Value) -> Result<Self::Claims, JwtVerificationError>;
 }
 
-/// Verifies tokens against an OpenID Connect provider: signature via the provider's JWKS, plus
-/// audience, issuer and expiry.
-///
-/// All of that is defined by OIDC, so it is identical for every compliant provider — `C`
-/// supplies the only provider-specific part, reading the payload into [`Claims`].
+/// Verifies tokens against an OpenID Connect provider: the signature against its published
+/// keys, then audience, issuer, expiry and issue time. `P` reads the verified payload.
 pub struct OidcJwtVerifier<P> {
+    /// The provider's discovery document, with server endpoints rebased.
     well_known_endpoint: WellKnownEndpoint,
+    /// The provider's signing keys.
     keys: Arc<Cache>,
     /// One per algorithm, built once: the audience and issuer never change after startup.
     validations: HashMap<Algorithm, Validation>,
+    /// Which provider's claims reader `P` this verifier uses.
     _marker: PhantomData<fn() -> P>,
 }
 
 impl<P> OidcJwtVerifier<P> {
+    /// Discovers the provider at `issuer_url` with `client`, accepting tokens for `audience`
+    /// over the URLs `transport` allows. Fails if the provider cannot be reached.
     pub async fn new(
         issuer_url: &str,
         client: reqwest::Client,
         audience: String,
+        transport: Transport,
     ) -> Result<Self, OidcSetupError> {
-        Self::with_discovery_url(issuer_url, issuer_url, client, audience).await
+        Self::with_discovery_url(issuer_url, issuer_url, client, audience, transport).await
     }
 
-    /// `issuer_url` is the provider's base URL, e.g.
-    /// `https://keycloak.example.com/realms/some-realm`. Reads the discovery document and the
-    /// signing keys, so it fails if the provider cannot be reached.
+    /// Like [`Self::new`], but reads discovery from `discovery_url` (e.g. an in-cluster address)
+    /// while tokens name `issuer_url`. Uses `client`, accepts tokens for `audience`, and only
+    /// URLs `transport` allows. Fails if the provider cannot be reached.
     pub async fn with_discovery_url(
         issuer_url: &str,
         discovery_url: &str,
         client: reqwest::Client,
         audience: String,
+        transport: Transport,
     ) -> Result<Self, OidcSetupError> {
+        transport.check("issuer", issuer_url)?;
+        transport.check("discovery", discovery_url)?;
         let well_known_endpoint = WellKnownEndpoint::fetch(&client, discovery_url).await?;
 
         // OIDC Discovery 1.0 §4.3: the document must name the issuer it was fetched for,
@@ -128,12 +165,17 @@ impl<P> OidcJwtVerifier<P> {
             });
         }
 
+        let mut well_known_endpoint = well_known_endpoint;
+        well_known_endpoint.rebase_server_endpoints(issuer_url, discovery_url);
+        well_known_endpoint.check_transport(transport)?;
+
         let source = HttpJwksSource::new(client, well_known_endpoint.jwks_uri.clone());
         let keys = Cache::new(source, KEY_TTL, KEY_MIN_REFRESH_INTERVAL).await?;
         Ok(Self::from_parts(well_known_endpoint, keys, &audience))
     }
 
-    /// Assembles a verifier from an already loaded discovery document and key cache.
+    /// A verifier from an already loaded `well_known_endpoint` and `keys`, accepting tokens
+    /// for `audience`.
     fn from_parts(well_known_endpoint: WellKnownEndpoint, keys: Cache, audience: &str) -> Self {
         let validations = ALGORITHMS
             .into_iter()
@@ -155,14 +197,17 @@ impl<P> OidcJwtVerifier<P> {
         }
     }
 
+    /// The provider's endpoints.
     pub fn well_known_endpoint(&self) -> &WellKnownEndpoint {
         &self.well_known_endpoint
     }
 
+    /// Where codes and refresh tokens are exchanged.
     pub fn token_endpoint(&self) -> &str {
         &self.well_known_endpoint.token_endpoint
     }
 
+    /// Where tokens are revoked.
     pub fn revocation_endpoint(&self) -> &str {
         &self.well_known_endpoint.revocation_endpoint
     }
@@ -199,8 +244,8 @@ impl<P> OidcJwtVerifier<P> {
     }
 }
 
-/// `iat` must be present and not in the future: a token "issued" later than now was not made
-/// by a provider whose clock agrees with ours.
+/// Requires `payload` to have an `iat` that is not in the future: a token "issued" later than
+/// now was not made by a provider whose clock agrees with ours.
 fn check_issued_at(payload: &Value) -> Result<(), JwtVerificationError> {
     let iat = payload
         .get("iat")
@@ -232,18 +277,58 @@ where
 /// The discovery document served from `/.well-known/openid-configuration`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct WellKnownEndpoint {
+    /// The issuer tokens must name in `iss`.
     pub issuer: String,
+    /// Where the browser signs in.
     pub authorization_endpoint: String,
+    /// Where codes and refresh tokens are exchanged.
     pub token_endpoint: String,
+    /// Where the browser signs out.
     pub end_session_endpoint: String,
+    /// The provider's public signing keys.
     pub jwks_uri: String,
+    /// Where tokens are revoked.
     pub revocation_endpoint: String,
 }
 
 impl WellKnownEndpoint {
-    /// Reads the discovery document for `issuer_url`, e.g.
-    /// `https://keycloak.example.com/realms/some-realm`. The well-known path is appended here
-    /// rather than by the caller, since the specification fixes it.
+    /// Requires every published endpoint to satisfy `transport`, including the ones only the
+    /// browser follows.
+    fn check_transport(&self, transport: Transport) -> Result<(), OidcSetupError> {
+        transport.check("authorization_endpoint", &self.authorization_endpoint)?;
+        transport.check("token_endpoint", &self.token_endpoint)?;
+        transport.check("end_session_endpoint", &self.end_session_endpoint)?;
+        transport.check("jwks_uri", &self.jwks_uri)?;
+        transport.check("revocation_endpoint", &self.revocation_endpoint)
+    }
+
+    /// Moves the endpoints this service calls itself (token, keys, revocation) from
+    /// `issuer_url` to `discovery_url` when published under the former: inside a container
+    /// network the public address is often unreachable. Browser-facing endpoints stay.
+    fn rebase_server_endpoints(&mut self, issuer_url: &str, discovery_url: &str) {
+        let (public, internal) = (
+            issuer_url.trim_end_matches('/'),
+            discovery_url.trim_end_matches('/'),
+        );
+        if public == internal {
+            return;
+        }
+        for endpoint in [
+            &mut self.token_endpoint,
+            &mut self.jwks_uri,
+            &mut self.revocation_endpoint,
+        ] {
+            if let Some(rest) = endpoint.strip_prefix(public)
+                && (rest.is_empty() || rest.starts_with('/'))
+            {
+                *endpoint = format!("{internal}{rest}");
+            }
+        }
+    }
+
+    /// Reads the discovery document of `issuer_url` (e.g.
+    /// `https://keycloak.example.com/realms/some-realm`) with `client`; the well-known path is
+    /// appended here.
     pub async fn fetch(
         client: &reqwest::Client,
         issuer_url: &str,
@@ -266,10 +351,13 @@ impl WellKnownEndpoint {
 /// A failure reading the discovery document at startup.
 #[derive(Debug, Error)]
 pub enum WellKnownEndpointError {
+    /// The connection failed.
     #[error("Could not reach the well-known endpoint: {0}")]
     Unreachable(reqwest::Error),
+    /// The endpoint answered with an error status.
     #[error("The well-known endpoint returned an error: {0}")]
     ErrorStatus(reqwest::Error),
+    /// The body is not a discovery document.
     #[error("The well-known endpoint is not valid JSON: {0}")]
     Malformed(reqwest::Error),
 }
@@ -277,12 +365,28 @@ pub enum WellKnownEndpointError {
 /// A failure setting up the verifier during startup.
 #[derive(Debug, Error)]
 pub enum OidcSetupError {
+    /// The discovery document could not be read.
     #[error(transparent)]
     Discovery(#[from] WellKnownEndpointError),
+    /// The discovery document names another issuer than configured.
     #[error("The discovery document is for issuer '{found}', not '{expected}'")]
-    IssuerMismatch { expected: String, found: String },
+    IssuerMismatch {
+        /// The configured issuer.
+        expected: String,
+        /// The issuer the document names.
+        found: String,
+    },
+    /// The signing keys could not be loaded.
     #[error("Could not load the signing keys: {0}")]
     SigningKeys(#[from] SourceError),
+    /// A provider URL is not HTTPS and plain HTTP was not allowed.
+    #[error("The provider's {name} '{url}' is not HTTPS")]
+    InsecureUrl {
+        /// Which URL, e.g. `jwks_uri`.
+        name: &'static str,
+        /// The URL itself.
+        url: String,
+    },
 }
 
 #[cfg(test)]
@@ -302,9 +406,12 @@ mod tests {
     use super::*;
     use crate::cache::{Cache, JwksSource, SourceError};
 
+    /// The tests' issuer.
     const ISSUER: &str = "https://idp.example/realms/test";
+    /// The tests' audience.
     const AUDIENCE: &str = "api";
 
+    /// The current time in Unix seconds.
     fn now() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -312,17 +419,21 @@ mod tests {
             .as_secs()
     }
 
+    /// `value` as base64url JSON, as in a JWT.
     fn encode(value: &Value) -> String {
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).unwrap())
     }
 
-    /// A signing key generated per test, published under `kid`.
+    /// A signing key generated per test, published under its `kid`.
     struct TestKey {
+        /// The key id tokens name.
         kid: &'static str,
+        /// The private and public key.
         pair: Ed25519KeyPair,
     }
 
     impl TestKey {
+        /// A fresh Ed25519 key with id `kid`.
         fn new(kid: &'static str) -> Self {
             let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
             Self {
@@ -331,6 +442,7 @@ mod tests {
             }
         }
 
+        /// The public key as a JWK.
         fn jwk(&self) -> Value {
             json!({
                 "kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA", "kid": self.kid,
@@ -338,12 +450,14 @@ mod tests {
             })
         }
 
+        /// A JWT of `header` and `claims`, signed with this key.
         fn sign(&self, header: &Value, claims: &Value) -> String {
             let input = format!("{}.{}", encode(header), encode(claims));
             let signature = self.pair.sign(input.as_bytes());
             format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()))
         }
 
+        /// A correctly signed JWT carrying `claims`.
         fn token(&self, claims: &Value) -> String {
             self.sign(
                 &json!({ "alg": "EdDSA", "typ": "JWT", "kid": self.kid }),
@@ -352,6 +466,7 @@ mod tests {
         }
     }
 
+    /// A key source that always returns the same set.
     #[derive(Debug)]
     struct StaticSource(JwkSet);
 
@@ -362,6 +477,7 @@ mod tests {
         }
     }
 
+    /// Hands payloads back untouched.
     struct Raw;
 
     impl ProviderClaims for Raw {
@@ -371,6 +487,7 @@ mod tests {
         }
     }
 
+    /// A verifier for [`ISSUER`] and [`AUDIENCE`] trusting the `published` keys.
     async fn verifier(published: &[&TestKey]) -> OidcJwtVerifier<Raw> {
         let keys: Vec<Value> = published.iter().map(|key| key.jwk()).collect();
         let set: JwkSet = serde_json::from_value(json!({ "keys": keys })).unwrap();
@@ -389,28 +506,150 @@ mod tests {
         OidcJwtVerifier::from_parts(well_known, cache, AUDIENCE)
     }
 
+    /// Valid claims for a fresh token.
     fn claims() -> Value {
         let now = now();
         json!({ "iss": ISSUER, "aud": AUDIENCE, "sub": "user-1", "iat": now, "exp": now + 300 })
     }
 
+    /// [`claims`] without `claim`.
     fn without(claim: &str) -> Value {
         let mut claims = claims();
         claims.as_object_mut().unwrap().remove(claim);
         claims
     }
 
+    /// [`claims`] with `claim` set to `value`.
     fn with(claim: &str, value: Value) -> Value {
         let mut claims = claims();
         claims[claim] = value;
         claims
     }
 
+    /// Asserts `verifier` refuses `token` as invalid; `why` names the case on failure.
     async fn assert_refused(verifier: &OidcJwtVerifier<Raw>, token: &str, why: &str) {
         let result = verifier.verify(token).await;
         assert!(
             matches!(result, Err(JwtVerificationError::Invalid(_))),
             "{why}: {result:?}"
+        );
+    }
+
+    #[test]
+    fn given_https_only_then_http_urls_are_refused() {
+        let transport = Transport::HttpsOnly;
+        assert!(
+            transport
+                .check("issuer", "https://idp.example/realms/test")
+                .is_ok()
+        );
+        assert!(matches!(
+            transport.check("issuer", "http://idp.example/realms/test"),
+            Err(OidcSetupError::InsecureUrl { name: "issuer", .. })
+        ));
+        assert!(transport.check("issuer", "not a url").is_err());
+    }
+
+    #[test]
+    fn given_insecure_http_allowed_then_http_and_https_are_accepted() {
+        let transport = Transport::AllowInsecureHttp;
+        assert!(
+            transport
+                .check("issuer", "http://keycloak:8080/realms/test")
+                .is_ok()
+        );
+        assert!(
+            transport
+                .check("issuer", "https://idp.example/realms/test")
+                .is_ok()
+        );
+        assert!(transport.check("issuer", "ftp://idp.example").is_err());
+    }
+
+    #[tokio::test]
+    async fn given_http_urls_without_allowing_them_then_setup_is_refused_before_any_request() {
+        let result = OidcJwtVerifier::<Raw>::new(
+            "http://unreachable.invalid/realms/test",
+            reqwest::Client::new(),
+            AUDIENCE.to_owned(),
+            Transport::HttpsOnly,
+        )
+        .await;
+        assert!(matches!(result, Err(OidcSetupError::InsecureUrl { .. })));
+    }
+
+    #[test]
+    fn given_one_http_endpoint_in_the_discovery_document_then_https_only_refuses_it() {
+        let endpoint = |path: &str| format!("https://idp.example/realms/test/{path}");
+        let mut endpoints = WellKnownEndpoint {
+            issuer: "https://idp.example/realms/test".into(),
+            authorization_endpoint: endpoint("auth"),
+            token_endpoint: endpoint("token"),
+            end_session_endpoint: endpoint("logout"),
+            jwks_uri: endpoint("certs"),
+            revocation_endpoint: endpoint("revoke"),
+        };
+        assert!(endpoints.check_transport(Transport::HttpsOnly).is_ok());
+        endpoints.jwks_uri = "http://idp.example/realms/test/certs".into();
+        assert!(matches!(
+            endpoints.check_transport(Transport::HttpsOnly),
+            Err(OidcSetupError::InsecureUrl {
+                name: "jwks_uri",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn given_a_separate_discovery_address_then_only_server_endpoints_move_to_it() {
+        let public = "http://localhost:8080/realms/test";
+        let internal = "http://keycloak:8080/realms/test";
+        let mut endpoints = WellKnownEndpoint {
+            issuer: public.into(),
+            authorization_endpoint: format!("{public}/protocol/openid-connect/auth"),
+            token_endpoint: format!("{public}/protocol/openid-connect/token"),
+            end_session_endpoint: format!("{public}/protocol/openid-connect/logout"),
+            jwks_uri: "http://keycloak:8080/realms/test/protocol/openid-connect/certs".into(),
+            revocation_endpoint: format!("{public}/protocol/openid-connect/revoke"),
+        };
+        endpoints.rebase_server_endpoints(public, internal);
+
+        assert_eq!(
+            endpoints.token_endpoint,
+            format!("{internal}/protocol/openid-connect/token")
+        );
+        assert_eq!(
+            endpoints.revocation_endpoint,
+            format!("{internal}/protocol/openid-connect/revoke")
+        );
+        assert_eq!(
+            endpoints.jwks_uri,
+            format!("{internal}/protocol/openid-connect/certs")
+        );
+        assert_eq!(
+            endpoints.authorization_endpoint,
+            format!("{public}/protocol/openid-connect/auth")
+        );
+        assert_eq!(
+            endpoints.end_session_endpoint,
+            format!("{public}/protocol/openid-connect/logout")
+        );
+    }
+
+    #[test]
+    fn given_a_lookalike_prefix_then_the_endpoint_is_left_alone() {
+        let mut endpoints = WellKnownEndpoint {
+            issuer: "http://idp/realms/test".into(),
+            authorization_endpoint: String::new(),
+            token_endpoint: "http://idp/realms/test-other/token".into(),
+            end_session_endpoint: String::new(),
+            jwks_uri: String::new(),
+            revocation_endpoint: String::new(),
+        };
+        endpoints.rebase_server_endpoints("http://idp/realms/test", "http://internal/realms/test");
+        assert_eq!(
+            endpoints.token_endpoint,
+            "http://idp/realms/test-other/token"
         );
     }
 

@@ -11,10 +11,13 @@ use thiserror::Error;
 
 use crate::random::{RandomUnvailable, random_token};
 
+/// Why a string is not a valid PKCE verifier (RFC 7636 §4.1).
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum PkceError {
+    /// Contains characters outside `[A-Za-z0-9-._~]`.
     #[error("Invalid character in PKCE component")]
     InvalidCharacters,
+    /// Not 43 to 128 characters long; holds the actual length.
     #[error("Invalid length. Must be between 43 and 128 characters: Have '{0}' chars")]
     InvalidLength(usize),
 }
@@ -72,7 +75,9 @@ impl fmt::Debug for CodeVerifier {
 
 /// The code challenge for the authorization code flow with PKCE
 pub struct CodeChallenge<A: PkceAlgorithm> {
+    /// The base64url-encoded hash of the verifier.
     challenge: String,
+    /// Ties the challenge to the algorithm that produced it.
     _marker: PhantomData<A>,
 }
 
@@ -105,12 +110,14 @@ pub trait PkceAlgorithm {
     /// The algorithm used for hashing
     fn algorithm() -> &'static Algorithm;
 
+    /// The challenge for `verifier`: its hash, base64url-encoded without padding.
     fn hash(verifier: &str) -> String {
         let result = digest::digest(Self::algorithm(), verifier.as_bytes());
         URL_SAFE_NO_PAD.encode(result.as_ref())
     }
 }
 
+/// SHA-256, the only method the BFF uses (RFC 7636 §4.2).
 pub struct S256;
 impl PkceAlgorithm for S256 {
     const NAME: &'static str = "S256";
@@ -119,11 +126,12 @@ impl PkceAlgorithm for S256 {
     }
 }
 
+/// Checks a verifier against a challenge, as an authorization server does.
 #[allow(dead_code)]
 pub struct PkceValidator;
 #[allow(dead_code)]
 impl PkceValidator {
-    /// Verifies the code challenge with the code verifier
+    /// Whether `verifier` hashes to `expected_challenge`, compared in constant time.
     pub fn verify<A: PkceAlgorithm>(
         verifier: &CodeVerifier,
         expected_challenge: &CodeChallenge<A>,

@@ -1,4 +1,5 @@
-//!
+//! Encrypts values stored in Redis with a key derived from the cookie value they belong to,
+//! so a Redis dump alone reveals nothing, and a value cannot be moved to another key or purpose.
 
 use ring::{
     aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
@@ -9,13 +10,18 @@ use std::sync::LazyLock;
 
 use crate::random::RandomUnvailable;
 
+/// What a sealed value is for. Part of the key and the authenticated data, so a value sealed
+/// for one purpose never opens as another.
 #[derive(Clone, Copy)]
 pub enum Purpose {
+    /// A sign-in in progress, sealed with its `state`.
     PendingLogin,
+    /// A session, sealed with its session id.
     Session,
 }
 
 impl Purpose {
+    /// The versioned label used as HKDF info and AEAD associated data.
     fn label(&self) -> &'static [u8] {
         match self {
             Purpose::PendingLogin => b"bff:pending-login:v1",
@@ -24,8 +30,10 @@ impl Purpose {
     }
 }
 
+/// Fixed per application; built once because constructing a `Salt` precomputes an HMAC key.
 static SALT: LazyLock<Salt> = LazyLock::new(|| Salt::new(HKDF_SHA256, b"bff-sealed-v1"));
 
+/// The ChaCha20-Poly1305 key for `purpose`, derived from `secret` with HKDF-SHA256.
 fn key_for(secret: &str, purpose: Purpose) -> LessSafeKey {
     let prk = SALT.extract(secret.as_bytes());
     let info = [purpose.label()];
@@ -35,6 +43,8 @@ fn key_for(secret: &str, purpose: Purpose) -> LessSafeKey {
     LessSafeKey::new(UnboundKey::from(okm))
 }
 
+/// Encrypts `plaintext` for `purpose` under a key derived from `secret` (the cookie value).
+/// Returns nonce, ciphertext and tag.
 pub fn seal(secret: &str, purpose: Purpose, plaintext: &[u8]) -> Result<Vec<u8>, RandomUnvailable> {
     let mut nonce = [0u8; NONCE_LEN];
     SystemRandom::new()
@@ -54,6 +64,8 @@ pub fn seal(secret: &str, purpose: Purpose, plaintext: &[u8]) -> Result<Vec<u8>,
     Ok(sealed)
 }
 
+/// Decrypts `sealed` with the key for `secret` and `purpose`; `None` if it was sealed with
+/// anything else or altered.
 pub fn open(secret: &str, purpose: Purpose, sealed: &[u8]) -> Option<Vec<u8>> {
     if sealed.len() < NONCE_LEN {
         return None;

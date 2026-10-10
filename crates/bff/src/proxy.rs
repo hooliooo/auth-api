@@ -1,3 +1,5 @@
+//! Forwards `/api/*` to the API with the session's access token.
+
 use axum::{
     Router,
     body::Body,
@@ -15,13 +17,13 @@ use std::net::SocketAddr;
 use axum::extract::ConnectInfo;
 
 use crate::{
-    client_ip::client_ip,
     csrf::CSRF_HEADER,
     error::AppError,
     session::{CurrentSession, refresh_access_token},
     state::AppState,
 };
 
+/// Headers that describe one connection and must not be forwarded (RFC 9110 §7.6.1).
 const HOP_BY_HOP: [&str; 8] = [
     "keep-alive",
     "proxy-authenticate",
@@ -33,6 +35,7 @@ const HOP_BY_HOP: [&str; 8] = [
     "upgrade",
 ];
 
+/// `/api/{*rest}`: every method, forwarded to the API.
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/{*rest}", any(api))
 }
@@ -49,6 +52,10 @@ const FORWARDING: [&str; 7] = [
     "true-client-ip",
 ];
 
+/// Forwards `request` to the API as `{API_BASE_URL}/{rest}`, with the session's access token
+/// (refreshed if needed) instead of the browser's credentials, and streams the answer back.
+/// `app_state` has the API client and settings, `peer` is the connection's address (for
+/// `X-Forwarded-For`), and `current_session` is the signed-in session.
 async fn api(
     State(app_state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -76,7 +83,7 @@ async fn api(
         headers.remove(name);
     }
     headers.remove(CSRF_HEADER);
-    let client = client_ip(&headers, peer, app_state.client_ip_header.as_ref());
+    let client = app_state.client_ip.client_ip(&headers, peer);
     for name in FORWARDING {
         headers.remove(name);
     }
@@ -109,6 +116,7 @@ async fn api(
     Ok(response.body(Body::from_stream(api_response.bytes_stream()))?)
 }
 
+/// Removes from `headers` the hop-by-hop headers and any named in `Connection`.
 fn strip_hop_by_hop(headers: &mut HeaderMap) {
     let listed: Vec<HeaderName> = headers
         .get_all(CONNECTION)
