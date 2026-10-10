@@ -1,5 +1,5 @@
 [package]
-name = "oidc"
+name    = "oidc"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,15 +8,15 @@ edition = "2024"
 e2e = []
 
 [dependencies]
-async-trait.workspace = true
+async-trait.workspace  = true
 jsonwebtoken.workspace = true
-kern.workspace = true
-reqwest.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
-tracing.workspace = true
+kern.workspace         = true
+reqwest.workspace      = true
+serde.workspace        = true
+serde_json.workspace   = true
+thiserror.workspace    = true
+tokio                  = { workspace = true, features = ["sync", "time"] }
+tracing.workspace      = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

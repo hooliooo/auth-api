@@ -1,7 +1,7 @@
 use axum::Form;
 use axum::Json;
 use axum::http::header::REFERRER_POLICY;
-use axum::http::header::SET_COOKIE;
+use axum::http::header::{CACHE_CONTROL, SET_COOKIE};
 use axum::routing::post;
 use axum::{
     Router,
@@ -28,7 +28,7 @@ use crate::{
     error::AppError,
     pkce::{CodeVerifier, PkceError, S256},
     random::{RandomUnvailable, random_token},
-    session::{self, SSO_IDLE_SECS, Session, now},
+    session::{self, SSO_MAX_SECS, Session, now},
     state::AppState,
 };
 
@@ -257,7 +257,8 @@ async fn callback(
 
     // Session management
     if let Some(old) = cookie::get(&headers, cookie::SESSION) {
-        session::delete(&mut redis, &old).await?;
+        let old_iam_sid = session::load(&mut redis, &old).await?.and_then(|s| s.sid);
+        session::delete(&mut redis, &old, old_iam_sid.as_deref()).await?;
     }
 
     let sid = random_token()?;
@@ -281,11 +282,11 @@ async fn callback(
     let headers = response.headers_mut();
     headers.append(
         SET_COOKIE,
-        cookie::set(cookie::SESSION, &sid, "Strict", SSO_IDLE_SECS)?,
+        cookie::set(cookie::SESSION, &sid, "Strict", SSO_MAX_SECS)?,
     );
     headers.append(SET_COOKIE, cookie::clear(cookie::LOGIN, "Lax")?);
     headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-    Ok(response)
+    Ok(no_store(response))
 }
 
 async fn exchange_code(
@@ -332,7 +333,12 @@ async fn logout(
     current_session: CurrentSession,
 ) -> Result<Response, AppError> {
     let mut redis = app_state.redis.clone();
-    session::delete(&mut redis, &current_session.id).await?;
+    session::delete(
+        &mut redis,
+        &current_session.id,
+        current_session.session.sid.as_deref(),
+    )
+    .await?;
 
     if let Some(refresh_token) = current_session.session.refresh_token.as_deref() {
         revoke_best_effort(&app_state, refresh_token).await;
@@ -354,7 +360,7 @@ async fn logout(
     response
         .headers_mut()
         .append(SET_COOKIE, cookie::clear(cookie::SESSION, "Strict")?);
-    Ok(response)
+    Ok(no_store(response))
 }
 
 async fn revoke_best_effort(app_state: &AppState, refresh_token: &str) {
@@ -416,7 +422,14 @@ struct SessionInfo {
     sub: String,
 }
 
-async fn current(current: CurrentSession) -> Json<SessionInfo> {
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn current(current: CurrentSession) -> Response {
     let s = current.session;
-    Json(SessionInfo { sub: s.sub })
+    no_store(Json(SessionInfo { sub: s.sub }).into_response())
 }

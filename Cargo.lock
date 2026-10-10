@@ -341,6 +341,7 @@ dependencies = [
  "base64 0.23.1",
  "oidc",
  "redis",
+ "regex",
  "reqwest",
  "ring",
  "serde",

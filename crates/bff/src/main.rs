@@ -44,9 +44,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let api_base_url = std::env::var("API_BASE_URL").ok();
+    let api_client = Client::builder()
+        .redirect(redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .read_timeout(Duration::from_secs(120))
+        .build()?;
 
     let state = AppState {
         http: client,
+        api_http: api_client,
         oidc: Arc::new(oidc),
         redis,
         api_base_url: api_base_url.map(Arc::from),
@@ -61,6 +67,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("0.0.0.0:5100").await?;
     info!("Listening on {}", listener.local_addr()?);
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::warn!(%error, "Cannot listen for Ctrl + C");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Cannot listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>().await;
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    info!("Shutting down");
 }

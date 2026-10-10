@@ -1,0 +1,10 @@
+include = ["crates/**/Cargo.toml"]
+# Root manifest is aligned by hand
+exclude = ["Cargo.toml"]
+
+[formatting]
+align_entries       = true
+indent_string       = "  "
+array_auto_collapse = false
+array_auto_expand   = false
+column_width        = 120

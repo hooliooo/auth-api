@@ -1,3 +1,5 @@
+//! Generates a random base64 encoded string.
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::rand::{SecureRandom, SystemRandom};
 use thiserror::Error;

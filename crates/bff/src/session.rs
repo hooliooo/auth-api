@@ -1,12 +1,18 @@
 use axum::extract::FromRequestParts;
 use core::fmt;
 use redis::{AsyncCommands, Script, aio::ConnectionManager};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::warn;
 
 use crate::{
-    cookie, crypto::hash_key, error::AppError, random::random_token, sealed, state::AppState,
+    cookie,
+    crypto::hash_key,
+    error::AppError,
+    random::random_token,
+    sealed::{self, Purpose},
+    state::AppState,
 };
 
 pub const SSO_IDLE_SECS: u64 = 3_600;
@@ -60,10 +66,6 @@ fn iam_index_key(iam_sid: &str) -> String {
     format!("bff:iam-sid:{iam_sid}")
 }
 
-fn kc_index_key(sid: &str) -> String {
-    format!("bff:kc-sid:{sid}")
-}
-
 fn lock_key(sid: &str) -> String {
     format!("bff:lock:{}", hash_key(sid))
 }
@@ -77,21 +79,20 @@ fn seal(sid: &str, session: &Session) -> Result<Vec<u8>, AppError> {
 }
 
 pub async fn load(redis: &mut ConnectionManager, sid: &str) -> Result<Option<Session>, AppError> {
-    let raw: Option<String> = redis::cmd("GETEX")
+    let raw: Option<Vec<u8>> = redis::cmd("GETEX")
         .arg(session_key(&hash_key(sid)))
         .arg("EX")
         .arg(SSO_IDLE_SECS)
         .query_async(redis)
         .await?;
-    let Some(session) = raw
-        .map(|s| serde_json::from_str::<Session>(&s))
-        .transpose()?
-    else {
+    let Some(plaintext) = raw.and_then(|raw| sealed::open(sid, Purpose::Session, &raw)) else {
         return Ok(None);
     };
 
+    let session: Session = serde_json::from_slice(&plaintext)?;
+
     if now().saturating_sub(session.created_at) > SSO_MAX_SECS {
-        delete(redis, sid).await?;
+        delete(redis, sid, session.sid.as_deref()).await?;
         return Ok(None);
     }
     Ok(Some(session))
@@ -105,15 +106,11 @@ pub async fn save(
     let hashed = hash_key(sid);
     let mut pipe = redis::pipe();
     pipe.atomic()
-        .set_ex(
-            session_key(&hashed),
-            serde_json::to_string(session)?,
-            SSO_IDLE_SECS,
-        )
+        .set_ex(session_key(&hashed), seal(sid, session)?, SSO_IDLE_SECS)
         .ignore();
 
     if let Some(kc_sid) = session.sid.as_deref() {
-        let index = kc_index_key(kc_sid);
+        let index = iam_index_key(kc_sid);
         pipe.sadd(&index, &hashed)
             .ignore()
             .expire(&index, SSO_MAX_SECS as i64)
@@ -123,8 +120,18 @@ pub async fn save(
     Ok(())
 }
 
-pub async fn delete(redis: &mut ConnectionManager, sid: &str) -> Result<(), AppError> {
-    redis.del::<_, ()>(session_key(&hash_key(sid))).await?;
+pub async fn delete(
+    redis: &mut ConnectionManager,
+    sid: &str,
+    iam_sid: Option<&str>,
+) -> Result<(), AppError> {
+    let hashed = hash_key(sid);
+    let mut pipe = redis::pipe();
+    pipe.atomic().del(session_key(&hashed)).ignore();
+    if let Some(iam_sid) = iam_sid {
+        pipe.srem(iam_index_key(iam_sid), &hashed).ignore();
+    }
+    pipe.query_async::<()>(redis).await?;
     Ok(())
 }
 
@@ -254,7 +261,7 @@ async fn refresh_locked(
     }
 
     let Some(refresh_token) = session.refresh_token.clone() else {
-        delete(redis, sid).await?;
+        delete(redis, sid, session.sid.as_deref()).await?;
         return Ok(None);
     };
 
@@ -272,10 +279,18 @@ async fn refresh_locked(
         .await
         .map_err(|e| AppError::RefreshAccessTokenFailed(e.to_string()))?;
 
-    if !response.status().is_success() {
-        warn!(status = %response.status(), "refresh token exchange failed");
-        delete(redis, sid).await?;
-        return Ok(None);
+    match response.status() {
+        status if status.is_success() => {}
+        StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED => {
+            warn!(status = %response.status(), "refresh token rejected; ending session");
+            delete(redis, sid, session.sid.as_deref()).await?;
+            return Ok(None);
+        }
+        status => {
+            return Err(AppError::RefreshAccessTokenFailed(format!(
+                "token endpoint returned {status}"
+            )));
+        }
     }
 
     let response: RefreshResponse = response

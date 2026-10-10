@@ -9,6 +9,7 @@ use crate::{env, error::StartupError};
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub http: Client,
+    pub api_http: Client,
     pub oidc: Arc<Oidc>,
     pub redis: ConnectionManager,
     pub api_base_url: Option<Arc<str>>,

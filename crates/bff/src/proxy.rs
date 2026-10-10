@@ -4,7 +4,7 @@ use axum::{
     extract::{Request, State},
     http::{
         HeaderMap, HeaderName, HeaderValue,
-        header::{AUTHORIZATION, CONNECTION, COOKIE, HOST},
+        header::{AUTHORIZATION, CONNECTION, COOKIE, HOST, SET_COOKIE},
     },
     response::Response,
     routing::any,
@@ -64,7 +64,7 @@ async fn api(
     );
 
     let api_response = app_state
-        .http
+        .api_http
         .request(parts.method, url)
         .headers(headers)
         .body(reqwest::Body::wrap_stream(body.into_data_stream()))
@@ -74,7 +74,7 @@ async fn api(
     let mut response_headers = api_response.headers().clone();
     let mut response = Response::builder().status(api_response.status());
     strip_hop_by_hop(&mut response_headers);
-    response_headers.remove(COOKIE);
+    response_headers.remove(SET_COOKIE);
 
     if let Some(headers) = response.headers_mut() {
         headers.extend(response_headers);

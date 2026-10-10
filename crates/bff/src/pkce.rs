@@ -1,3 +1,6 @@
+//! Handles the Proof Key for Code Exchange (PKCE) step within the authorization code flow of the
+//! login process.
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use core::fmt;
 use ring::digest::{self, Algorithm};

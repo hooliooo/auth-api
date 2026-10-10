@@ -1,8 +1,11 @@
+//!
+
 use ring::{
     aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
     hkdf::{HKDF_SHA256, Salt},
     rand::{SecureRandom, SystemRandom},
 };
+use std::sync::LazyLock;
 
 use crate::random::RandomUnvailable;
 
@@ -21,8 +24,10 @@ impl Purpose {
     }
 }
 
+static SALT: LazyLock<Salt> = LazyLock::new(|| Salt::new(HKDF_SHA256, b"bff-sealed-v1"));
+
 fn key_for(secret: &str, purpose: Purpose) -> LessSafeKey {
-    let prk = Salt::new(HKDF_SHA256, b"bff-sealed-v1").extract(secret.as_bytes());
+    let prk = SALT.extract(secret.as_bytes());
     let info = [purpose.label()];
     let okm = prk
         .expand(&info, &CHACHA20_POLY1305)
