@@ -1,4 +1,4 @@
-FROM rust:1.98-trixie AS build
+FROM rust:1.99-trixie AS build
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

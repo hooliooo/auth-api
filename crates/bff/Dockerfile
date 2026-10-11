@@ -1,4 +1,4 @@
-FROM rust:1.98-trixie AS build
+FROM rust:1.99-trixie AS build
 WORKDIR /src
 # Cargo features of the image; e.g. --build-arg FEATURES= for a build without the rate limit.
 ARG FEATURES=rate-limit

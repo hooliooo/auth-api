@@ -2,6 +2,7 @@
 name    = "auth-api"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 auth-core = { path = "../core" }

@@ -2,6 +2,7 @@
 name    = "rest-api"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 # Tests against the docker/ stack only run with `--features e2e`
 [features]
