@@ -88,11 +88,13 @@ echo "* $bff_client_id"
   # API needs: the subject and session (basic), roles, and acr. profile and email are optional,
   # for a BFF configured to request them (OIDC_SCOPES); web-origins, offline_access, phone,
   # address and the rest are not available to this client at all.
+  # No client secret: the BFF authenticates with assertions signed by its private key
+  # (private_key_jwt); Keycloak fetches the public key from the BFF's JWKS URL.
   $kcadm create -r $realm clients -f - <<<"
   {
     \"clientId\": \"$bff_client_id\",
     \"name\": \"BFF\",
-    \"secret\": \"$bff_client_secret\",
+    \"clientAuthenticatorType\": \"client-jwt\",
     \"publicClient\": false,
     \"standardFlowEnabled\": true,
     \"implicitFlowEnabled\": false,
@@ -107,7 +109,10 @@ echo "* $bff_client_id"
       \"pkce.code.challenge.method\": \"S256\",
       \"post.logout.redirect.uris\": \"$bff_base_url/\",
       \"backchannel.logout.url\": \"$bff_internal_url/auth/backchannel-logout\",
-      \"backchannel.logout.session.required\": \"true\"
+      \"backchannel.logout.session.required\": \"true\",
+      \"use.jwks.url\": \"true\",
+      \"jwks.url\": \"$bff_internal_url/.well-known/jwks.json\",
+      \"token.endpoint.auth.signing.alg\": \"ES256\"
     }
   }"
 

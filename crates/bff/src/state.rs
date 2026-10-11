@@ -1,5 +1,6 @@
 //! Shared application state and the OpenID Connect configuration.
 
+use crate::client_auth::{ClientAuth, ClientAuthError};
 use crate::client_ip::ClientIpSource;
 use oidc::{OidcJwtVerifier, ProviderClaims, Transport};
 use redis::aio::ConnectionManager;
@@ -35,9 +36,13 @@ impl AppState {
         &self.oidc.config.client_id
     }
 
-    /// The BFF's client secret at the identity provider.
-    pub fn client_secret(&self) -> &str {
-        &self.oidc.config.client_secret
+    /// The form fields that authenticate the BFF on a call to the identity provider: its client
+    /// id and its secret, or a fresh signed assertion addressed to the issuer.
+    pub fn client_auth_fields(&self) -> Result<Vec<(&'static str, String)>, ClientAuthError> {
+        let config = &self.oidc.config;
+        config
+            .client_auth
+            .form_fields(&config.client_id, &config.issuer)
     }
 
     /// The BFF's public sign-in callback URL.
@@ -129,8 +134,8 @@ pub(crate) struct OidcConfig {
     pub discover_url: String,
     /// `CLIENT_ID`.
     pub client_id: String,
-    /// `CLIENT_SECRET`.
-    pub client_secret: String,
+    /// How the BFF authenticates itself: `CLIENT_AUTH` and its keys or secret.
+    pub client_auth: ClientAuth,
     /// `REDIRECT_URI`: the BFF's public sign-in callback.
     pub redirect_uri: String,
     /// Whether `http://` URLs are accepted for Keycloak and the BFF's own redirect URI.
@@ -179,7 +184,7 @@ impl OidcConfig {
             discover_url: env::env("DISCOVERY_URI").unwrap_or_else(|_| issuer.clone()),
             issuer,
             client_id: env::env("CLIENT_ID")?,
-            client_secret: env::env("CLIENT_SECRET")?,
+            client_auth: ClientAuth::from_env()?,
             redirect_uri,
         })
     }

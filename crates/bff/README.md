@@ -15,6 +15,7 @@ with the user's access token.
 | `POST /auth/logout` | SPA (`x-bff-csrf: 1`) | ends the session here and, server to server, at Keycloak; returns `logoutUrl`: the app's start page, or Keycloak's logout page (no token in it) if Keycloak could not be reached |
 | `POST /auth/backchannel-logout` | Keycloak | ends every session of one Keycloak sign-in |
 | `ANY /api/*` | SPA (`x-bff-csrf: 1` for writes) | forwards to `API_BASE_URL` with a fresh bearer token; paths with `.` or `..` segments are refused (400) |
+| `GET /.well-known/jwks.json` | Keycloak | the BFF's public client keys, with `private_key_jwt` (404 otherwise) |
 | `GET /health`, `GET /health/ready` | orchestrator | process up; Redis reachable |
 
 Every response carries an `x-request-id`, also logged and forwarded to the API.
@@ -31,7 +32,12 @@ sign-in.
 |---|---|---|---|
 | `ISSUER_URI` | yes | | Keycloak realm as tokens name it, e.g. `https://id.example.com/realms/main` |
 | `DISCOVERY_URI` | no | `ISSUER_URI` | where the BFF reaches Keycloak itself, e.g. an in-cluster address; token, key and revocation calls go there too |
-| `CLIENT_ID`, `CLIENT_SECRET` | yes | | the BFF's confidential Keycloak client |
+| `CLIENT_ID` | yes | | the BFF's confidential Keycloak client |
+| `CLIENT_AUTH` | no | `client_secret` | how the BFF authenticates to Keycloak: `client_secret` or `private_key_jwt` (signed assertions; preferred) |
+| `CLIENT_SECRET` | with `client_secret` | | the client secret |
+| `CLIENT_KEY_FILE` | with `private_key_jwt` | | the EC P-256 private key (PEM) assertions are signed with |
+| `CLIENT_KEY_ID` | no | the key's JWK thumbprint | the key's `kid` |
+| `CLIENT_NEXT_KEY_FILE`, `CLIENT_NEXT_KEY_ID` | no | | a key published ahead of a rotation, not yet used |
 | `REDIRECT_URI` | yes | | the BFF's public callback, e.g. `https://app.example.com/auth/callback` |
 | `REDIS_URI` | yes | | e.g. `redis://redis:6379` |
 | `API_BASE_URL` | no | | where `/api/*` goes; without it `/api/*` fails |
@@ -44,18 +50,36 @@ sign-in.
 | `LOGIN_RATE_LIMIT_PER_MINUTE` | no | `10` | sign-in starts per client IP and minute; `0` turns it off (needs the `rate-limit` feature) |
 | `RUST_LOG` | no | `info` | log filter, e.g. `bff=debug,info` |
 
-The Keycloak client needs standard flow with PKCE (S256), the redirect URI above, and a
-back-channel logout URL of `<BFF>/auth/backchannel-logout` with "session required" on;
-Its default client scopes are only `basic`, `roles` and `acr` (default scopes are in every token,
-whatever is requested), with `profile` and `email` optional for a BFF configured to request
-them; `web-origins`, `offline_access` and the rest are not assigned. For the API to accept the
-forwarded tokens, it also needs an audience mapper adding the API's
-audience (`authentication.layer.api`) to access tokens, not ID tokens. "Full scope allowed" is
-off, so tokens carry only the roles mapped to the client: in the dev realm, `multi-tenancy-admin`,
-the one role the API acts on.
-`iam-config/keycloak-config/setup-scripts/setup_realm.sh` sets all of this up for the dev realm. The dev realm rotates refresh tokens and
-accepts each only once (`revokeRefreshToken`, `refreshTokenMaxReuse=0`); the BFF refreshes each
-session under a Redis lock, so parallel requests never spend the same token twice.
+### The Keycloak client
+
+`iam-config/keycloak-config/setup-scripts/setup_realm.sh` sets all of this up for the dev realm.
+
+- **Flow:** standard flow with PKCE (S256), the redirect URI above, and back-channel logout to
+  `<BFF>/auth/backchannel-logout` with "session required" on.
+- **Client authentication:** "Signed JWT" (`private_key_jwt`) with algorithm ES256 and a JWKS
+  URL of `<BFF>/.well-known/jwks.json`, where the BFF publishes its public key; no client
+  secret. A client secret still works with `CLIENT_AUTH=client_secret`.
+- **Scopes:** default client scopes only `basic`, `roles` and `acr` (default scopes are in every
+  token, whatever is requested); `profile` and `email` optional; `web-origins`,
+  `offline_access` and the rest not assigned.
+- **Audience:** an audience mapper adding the API's audience (`authentication.layer.api`) to
+  access tokens, not ID tokens, so the API accepts the tokens the BFF forwards.
+- **Roles:** "Full scope allowed" off, so tokens carry only the roles mapped to the client: in
+  the dev realm, `multi-tenancy-admin`, the one role the API acts on.
+- **Refresh tokens:** the dev realm rotates them and accepts each only once
+  (`revokeRefreshToken`, `refreshTokenMaxReuse=0`); the BFF refreshes each session under a
+  Redis lock, so parallel requests never spend the same token twice.
+
+### Rotating the client key
+
+1. Set `CLIENT_NEXT_KEY_FILE` to the new key and restart: the BFF publishes both public keys
+   and still signs with the old one.
+2. Wait until Keycloak has picked up the new key set, then make the new key `CLIENT_KEY_FILE`
+   (dropping `CLIENT_NEXT_KEY_FILE`) and restart: the BFF signs with the new key.
+
+Keys are EC P-256 in PEM, e.g. `openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8
+-topk8 -nocrypt`.
+
 
 ### Build features
 
@@ -87,7 +111,14 @@ proxy, so the BFF sees the proxy's address unless told where the client's is:
 
 ## Local development
 
-From the workspace root:
+From the workspace root, once, create your own client key (`crates/bff/dev/client-key.pem`,
+ignored by git; the stack refuses to start without it):
+
+```sh
+crates/bff/dev/generate-client-key.sh
+```
+
+Then:
 
 ```sh
 docker compose -f crates/bff/docker-compose.yml up -d --build

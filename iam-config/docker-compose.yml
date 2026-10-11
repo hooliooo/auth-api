@@ -49,7 +49,6 @@ services:
       end_to_end_client_id: "end.to.end.client"
       end_to_end_client_secret: "end.to.end.client.secret"
       bff_client_id: "bff"
-      bff_client_secret: "bff.secret"
       bff_base_url: "http://localhost:5100"
       bff_internal_url: "http://bff:5100"
     command: |

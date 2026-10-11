@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod auth;
+mod client_auth;
 mod client_ip;
 mod cookie;
 mod crypto;
@@ -89,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .merge(auth::routes())
+        .merge(client_auth::routes())
         .merge(proxy::routes())
         .merge(health::routes())
         .layer(middleware::from_fn(csrf::require_header));

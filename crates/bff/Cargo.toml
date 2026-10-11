@@ -17,6 +17,7 @@ metrics = []
 async-trait.workspace        = true
 axum                         = { workspace = true }
 base64.workspace             = true
+jsonwebtoken.workspace       = true
 oidc                         = { path = "../oidc" }
 redis                        = { workspace = true, features = ["tokio-comp", "connection-manager"] }
 reqwest                      = { workspace = true, features = ["stream"] }

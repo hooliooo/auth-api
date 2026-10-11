@@ -49,6 +49,9 @@ pub enum AppError {
     /// No valid session.
     #[error("Not signed in")]
     Unauthorized,
+    /// The BFF could not authenticate itself to the identity provider.
+    #[error(transparent)]
+    ClientAuth(#[from] crate::client_auth::ClientAuthError),
     /// An `/api/*` path that would leave the API's base URL, e.g. through `..`.
     #[error("API path not allowed")]
     InvalidApiPath,
@@ -88,9 +91,10 @@ fn status_of(error: &AppError) -> StatusCode {
         AppError::Redis(_) | AppError::NoApiUrl => StatusCode::SERVICE_UNAVAILABLE,
         #[cfg(feature = "rate-limit")]
         AppError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
-        AppError::Header(_) | AppError::Json(_) | AppError::Response(_) => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+        AppError::Header(_)
+        | AppError::Json(_)
+        | AppError::Response(_)
+        | AppError::ClientAuth(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

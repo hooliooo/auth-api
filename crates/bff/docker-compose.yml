@@ -17,6 +17,15 @@ services:
       context: ../..
       dockerfile: crates/bff/Dockerfile
     container_name: bff
+    volumes:
+      # Created by dev/generate-client-key.sh. Refused if missing, rather than Docker creating
+      # an empty directory in its place.
+      - type: bind
+        source: ./dev/client-key.pem
+        target: /run/secrets/bff-client-key.pem
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "5100:5100"
     environment:
@@ -24,7 +33,10 @@ services:
       ISSUER_URI: http://localhost:8080/realms/test
       DISCOVERY_URI: http://keycloak-api:8080/realms/test
       CLIENT_ID: bff
-      CLIENT_SECRET: bff.secret
+      # Signed client assertions instead of a client secret, with the key each developer
+      # generates locally; production keys come from a secret store.
+      CLIENT_AUTH: private_key_jwt
+      CLIENT_KEY_FILE: /run/secrets/bff-client-key.pem
       REDIRECT_URI: http://localhost:5100/auth/callback
       REDIS_URI: redis://redis:6379
       # Keycloak and the BFF run on plain HTTP in this dev stack; never set this in production.

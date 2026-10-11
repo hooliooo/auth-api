@@ -10,12 +10,13 @@ use reqwest::{Method, StatusCode, header::CACHE_CONTROL};
 use serde_json::Value;
 
 use crate::support::{
-    Browser, USERNAME, arm_keycloak_fault, bff, end_keycloak_session, eventually, hash_key,
-    index_members, keycloak_refresh_status, keycloak_session_idle_secs, keycloak_user_session_ids,
-    location, login_cookie_name, login_url, metric, metrics_page, now, open_sealed, query_param,
+    Browser, JWT_BEARER, USERNAME, arm_keycloak_fault, bff, bff_client_key_id, client_assertion,
+    dev_client_key, end_keycloak_session, eventually, hash_key, index_members,
+    keycloak_refresh_status, keycloak_session_idle_secs, keycloak_user_session_ids, location,
+    login_cookie_name, login_url, metric, metrics_page, now, open_sealed, query_param,
     raw_get_status, read_session, recorded_logout_tokens, redis, set_backchannel_logout_url,
-    set_cookie, set_realm_role, sign_in, sign_in_until_callback, untrusted_bff, unverified_payload,
-    wait_for_bff, write_session,
+    set_cookie, set_realm_role, sign_in, sign_in_until_callback, token_request, untrusted_bff,
+    unverified_payload, wait_for_bff, write_session,
 };
 
 /// Asserts `response` forbids caching; `what` names it in the failure.
@@ -1213,4 +1214,100 @@ async fn given_a_sign_in_asking_for_other_scopes_then_the_bff_requests_only_its_
         Some("openid"),
         "the browser has no say in the scopes"
     );
+}
+
+#[tokio::test]
+async fn given_private_key_jwt_then_the_bff_publishes_only_its_public_key() {
+    wait_for_bff().await;
+    let jwks: Value = reqwest::get(bff("/.well-known/jwks.json"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let key = &jwks["keys"][0];
+    assert_eq!(key["kty"], "EC");
+    assert_eq!(key["alg"], "ES256");
+    assert!(key["kid"].as_str().is_some_and(|kid| !kid.is_empty()));
+    assert!(key.get("d").is_none(), "no private key material");
+}
+
+#[tokio::test]
+async fn given_private_key_jwt_then_the_old_client_secret_no_longer_authenticates_the_bff() {
+    wait_for_bff().await;
+    let (status, error) = token_request(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", "irrelevant"),
+        ("client_id", "bff"),
+        ("client_secret", "bff.secret"),
+    ])
+    .await;
+
+    // invalid_client, as 400: OAuth only requires 401 for the Authorization header.
+    assert!(status.is_client_error());
+    assert_eq!(error.as_deref(), Some("invalid_client"));
+}
+
+#[tokio::test]
+async fn given_a_client_assertion_then_keycloak_accepts_it_once_and_never_after_it_expires() {
+    wait_for_bff().await;
+    let kid = bff_client_key_id().await;
+    let request = |assertion: String| async move {
+        token_request(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", "not-a-refresh-token"),
+            ("client_id", "bff"),
+            ("client_assertion_type", JWT_BEARER),
+            ("client_assertion", &assertion),
+        ])
+        .await
+    };
+    let assertion = client_assertion(&dev_client_key(), &kid, 60);
+
+    // Accepted as the client: the failure is the made-up refresh token, not the assertion.
+    let (_, first) = request(assertion.clone()).await;
+    assert_eq!(
+        first.as_deref(),
+        Some("invalid_grant"),
+        "the client is authenticated"
+    );
+
+    // Keycloak answers invalid_client with 400 here: OAuth only requires 401 when the client
+    // authenticated with the Authorization header.
+    let (_, replayed) = request(assertion).await;
+    assert_eq!(
+        replayed.as_deref(),
+        Some("invalid_client"),
+        "an assertion works once"
+    );
+
+    let (_, expired) = request(client_assertion(&dev_client_key(), &kid, -120)).await;
+    assert_eq!(
+        expired.as_deref(),
+        Some("invalid_client"),
+        "an expired assertion is refused"
+    );
+}
+
+#[tokio::test]
+async fn given_a_client_assertion_signed_with_another_key_then_keycloak_refuses_it() {
+    wait_for_bff().await;
+    let kid = bff_client_key_id().await;
+    let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &ring::rand::SystemRandom::new(),
+    )
+    .unwrap();
+    let forged_key = jsonwebtoken::EncodingKey::from_ec_der(pkcs8.as_ref());
+
+    let (_, error) = token_request(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", "not-a-refresh-token"),
+        ("client_id", "bff"),
+        ("client_assertion_type", JWT_BEARER),
+        ("client_assertion", &client_assertion(&forged_key, &kid, 60)),
+    ])
+    .await;
+
+    assert_eq!(error.as_deref(), Some("invalid_client"));
 }

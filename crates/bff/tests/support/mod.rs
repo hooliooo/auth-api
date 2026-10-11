@@ -542,21 +542,82 @@ pub async fn set_backchannel_logout_url(url: &str) -> String {
 
 /// Keycloak's status for exchanging `refresh_token` as the BFF would: 200 if still valid.
 pub async fn keycloak_refresh_status(refresh_token: &str) -> StatusCode {
-    Client::new()
+    let assertion = client_assertion(&dev_client_key(), &bff_client_key_id().await, 60);
+    token_request(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", "bff"),
+        ("client_assertion_type", JWT_BEARER),
+        ("client_assertion", &assertion),
+    ])
+    .await
+    .0
+}
+
+/// The `client_assertion_type` of a signed JWT client assertion.
+pub const JWT_BEARER: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+/// A request to the test realm's token endpoint with `form`; its status and its `error`, if any.
+pub async fn token_request(form: &[(&str, &str)]) -> (StatusCode, Option<String>) {
+    let response = Client::new()
         .post(format!(
             "{}/realms/test/protocol/openid-connect/token",
             keycloak_base()
         ))
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", "bff"),
-            ("client_secret", "bff.secret"),
-        ])
+        .form(form)
         .send()
         .await
-        .expect("Keycloak is reachable")
-        .status()
+        .expect("Keycloak is reachable");
+    let status = response.status();
+    let body: Value = response.json().await.unwrap_or_default();
+    (status, body["error"].as_str().map(str::to_owned))
+}
+
+/// The local stack's client key (`dev/client-key.pem`), which the running BFF signs with.
+pub fn dev_client_key() -> jsonwebtoken::EncodingKey {
+    let pem = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/dev/client-key.pem"))
+        .expect("the local client key exists; run crates/bff/dev/generate-client-key.sh");
+    jsonwebtoken::EncodingKey::from_ec_pem(&pem).expect("an EC P-256 key")
+}
+
+/// The key id the BFF publishes for its client key.
+pub async fn bff_client_key_id() -> String {
+    let jwks: Value = Client::new()
+        .get(bff("/.well-known/jwks.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    jwks["keys"][0]["kid"]
+        .as_str()
+        .expect("the BFF publishes its key")
+        .to_owned()
+}
+
+/// A client assertion for client `bff`, signed with `key` under key id `kid`, expiring
+/// `expires_in` seconds from now (negative for one already expired).
+pub fn client_assertion(key: &jsonwebtoken::EncodingKey, kid: &str, expires_in: i64) -> String {
+    let now = now() as i64;
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+    header.kid = Some(kid.to_owned());
+    let claims = serde_json::json!({
+        "iss": "bff",
+        "sub": "bff",
+        "aud": format!("{}/realms/test", keycloak_base()),
+        "jti": URL_SAFE_NO_PAD.encode(rand_bytes()),
+        "iat": now,
+        "exp": now + expires_in,
+    });
+    jsonwebtoken::encode(&header, &claims, key).expect("signing works")
+}
+
+/// 16 random bytes.
+fn rand_bytes() -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    SystemRandom::new().fill(&mut bytes).expect("random source");
+    bytes
 }
 
 /// The test realm's SSO session idle timeout, which the BFF's sessions follow.

@@ -411,18 +411,17 @@ async fn exchange_code(
     code: &str,
     verifier: &CodeVerifier,
 ) -> Result<TokenResponse, AppError> {
-    let config = &app_state.oidc.config;
+    let mut form = vec![
+        ("grant_type", "authorization_code".to_owned()),
+        ("code", code.to_owned()),
+        ("redirect_uri", app_state.redirect_uri().to_owned()),
+        ("code_verifier", verifier.as_str().to_owned()),
+    ];
+    form.extend(app_state.client_auth_fields()?);
     let response = app_state
         .http
         .post(app_state.oidc.token_endpoint())
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("redirect_uri", config.redirect_uri.as_str()),
-            ("client_id", config.client_id.as_str()),
-            ("client_secret", config.client_secret.as_str()),
-            ("code_verifier", verifier.as_str()),
-        ])
+        .form(&form)
         .send()
         .await
         .map_err(|err| LoginError::CodeExchangeError(err.to_string()))?;
@@ -502,14 +501,18 @@ async fn logout(
 /// tells the session's other clients through back-channel logout. `false` if it failed; that is
 /// only logged, since the BFF's session is already gone.
 async fn end_provider_session(app_state: &AppState, refresh_token: &str) -> bool {
+    let mut form = vec![("refresh_token", refresh_token.to_owned())];
+    match app_state.client_auth_fields() {
+        Ok(fields) => form.extend(fields),
+        Err(error) => {
+            warn!(%error, "cannot authenticate the logout");
+            return false;
+        }
+    }
     let result = app_state
         .http
         .post(app_state.oidc.internal_end_session_endpoint())
-        .form(&[
-            ("refresh_token", refresh_token),
-            ("client_id", app_state.client_id()),
-            ("client_secret", app_state.client_secret()),
-        ])
+        .form(&form)
         .send()
         .await;
     match result {

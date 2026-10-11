@@ -320,16 +320,16 @@ async fn refresh_locked(
         return Ok(None);
     };
 
+    let mut form = vec![
+        ("grant_type", "refresh_token".to_owned()),
+        ("refresh_token", refresh_token),
+    ];
+    form.extend(app_state.client_auth_fields()?);
     let response = app_state
         .http
         .post(app_state.oidc.token_endpoint())
         .timeout(REFRESH_REQUEST_TIMEOUT)
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token.as_str()),
-            ("client_id", app_state.client_id()),
-            ("client_secret", app_state.client_secret()),
-        ])
+        .form(&form)
         .send()
         .await
         .map_err(|e| {
