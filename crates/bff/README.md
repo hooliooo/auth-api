@@ -12,12 +12,18 @@ with the user's access token.
 | `GET /auth/login?returnUrl=/path` | browser navigation | starts a sign-in, redirects to Keycloak |
 | `GET /auth/callback` | Keycloak redirect | finishes the sign-in, sets the session cookie; on failure redirects to `/?login_error=1` |
 | `GET /auth/session` | SPA | who is signed in, or 401 |
-| `POST /auth/logout` | SPA (`x-bff-csrf: 1`) | ends the session, revokes the refresh token, returns Keycloak's `logoutUrl` for the SPA to navigate to |
+| `POST /auth/logout` | SPA (`x-bff-csrf: 1`) | ends the session here and, server to server, at Keycloak; returns `logoutUrl`: the app's start page, or Keycloak's logout page (no token in it) if Keycloak could not be reached |
 | `POST /auth/backchannel-logout` | Keycloak | ends every session of one Keycloak sign-in |
-| `ANY /api/*` | SPA (`x-bff-csrf: 1` for writes) | forwards to `API_BASE_URL` with a fresh bearer token |
+| `ANY /api/*` | SPA (`x-bff-csrf: 1` for writes) | forwards to `API_BASE_URL` with a fresh bearer token; paths with `.` or `..` segments are refused (400) |
 | `GET /health`, `GET /health/ready` | orchestrator | process up; Redis reachable |
 
 Every response carries an `x-request-id`, also logged and forwarded to the API.
+
+A session lasts exactly as long as the user's Keycloak session: each sign-in and token refresh
+sets its expiry from Keycloak's `refresh_expires_in`, so the realm's SSO idle and maximum
+lifetimes apply without being configured twice. Reading the session does not extend it; a
+token refresh, like in Keycloak, does. The BFF additionally ends every session 24 hours after
+sign-in.
 
 ## Configuration
 
@@ -34,13 +40,17 @@ Every response carries an `x-request-id`, also logged and forwarded to the API.
 | `CLIENT_IP_HEADER` | no | | header a reverse proxy puts the client's IP in, e.g. `x-real-ip` or `cf-connecting-ip`; see below |
 | `TRUSTED_PROXIES` | with `CLIENT_IP_HEADER` | | comma-separated addresses or ranges (`10.42.0.0/16`) allowed to set that header |
 | `LOGIN_RATE_LIMIT_PER_MINUTE` | no | `10` | sign-in starts per client IP and minute; `0` turns it off (needs the `rate-limit` feature) |
-| `RUST_LOG` | no | | log filter, e.g. `bff=info,oidc=info` |
+| `RUST_LOG` | no | `info` | log filter, e.g. `bff=debug,info` |
 
 The Keycloak client needs standard flow with PKCE (S256), the redirect URI above, and a
 back-channel logout URL of `<BFF>/auth/backchannel-logout` with "session required" on;
-`iam-config/keycloak-config/setup-scripts/setup_realm.sh` sets these up for the dev realm. For
-the API to accept the forwarded tokens, the client also needs an audience mapper adding the
-API's audience; the dev realm does not have one yet.
+For the API to accept the forwarded tokens, it also needs an audience mapper adding the API's
+audience (`authentication.layer.api`) to access tokens, not ID tokens. "Full scope allowed" is
+off, so tokens carry only the roles mapped to the client: in the dev realm, `multi-tenancy-admin`,
+the one role the API acts on.
+`iam-config/keycloak-config/setup-scripts/setup_realm.sh` sets all of this up for the dev realm. The dev realm rotates refresh tokens and
+accepts each only once (`revokeRefreshToken`, `refreshTokenMaxReuse=0`); the BFF refreshes each
+session under a Redis lock, so parallel requests never spend the same token twice.
 
 ### Build features
 
@@ -89,7 +99,8 @@ docker compose -f crates/bff/docker-compose.yml -f crates/bff/docker-compose.tes
 cargo test -p bff --test e2e                   # end-to-end, against the test stack
 ```
 
-The test stack adds `echo-api`, which plays three parts: a stand-in API behind `/api/*`, a
+The test stack adds a second BFF on `localhost:5102` (`E2E_UNTRUSTED_BFF_URL`) that trusts no
+proxy, to check a forged client IP header is ignored, and `echo-api`, which plays three parts: a stand-in API behind `/api/*`, a
 proxy in front of Keycloak that tests can make fail (to check refresh errors keep the
 session), and a recorder for back-channel logout tokens (to check a token is accepted once).
 The tests reach it on `localhost:5199` (`E2E_HELPERS_URL`). Other overrides: `E2E_BFF_URL`,

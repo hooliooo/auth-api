@@ -128,6 +128,10 @@ pub struct OidcJwtVerifier<P> {
     validations: HashMap<Algorithm, Validation>,
     /// Which provider's claims reader `P` this verifier uses.
     _marker: PhantomData<fn() -> P>,
+    /// The end-session endpoint at the internal address this service reaches the provider at
+    /// (the discovery address), for logging a session out server to server; the published one
+    /// is for browsers.
+    internal_end_session_endpoint: String,
 }
 
 impl<P> OidcJwtVerifier<P> {
@@ -168,10 +172,17 @@ impl<P> OidcJwtVerifier<P> {
         let mut well_known_endpoint = well_known_endpoint;
         well_known_endpoint.rebase_server_endpoints(issuer_url, discovery_url);
         well_known_endpoint.check_transport(transport)?;
+        let internal_end_session_endpoint = rebase(
+            &well_known_endpoint.end_session_endpoint,
+            issuer_url,
+            discovery_url,
+        );
 
         let source = HttpJwksSource::new(client, well_known_endpoint.jwks_uri.clone());
         let keys = Cache::new(source, KEY_TTL, KEY_MIN_REFRESH_INTERVAL).await?;
-        Ok(Self::from_parts(well_known_endpoint, keys, &audience))
+        let mut verifier = Self::from_parts(well_known_endpoint, keys, &audience);
+        verifier.internal_end_session_endpoint = internal_end_session_endpoint;
+        Ok(verifier)
     }
 
     /// A verifier from an already loaded `well_known_endpoint` and `keys`, accepting tokens
@@ -190,6 +201,7 @@ impl<P> OidcJwtVerifier<P> {
             })
             .collect();
         Self {
+            internal_end_session_endpoint: well_known_endpoint.end_session_endpoint.clone(),
             well_known_endpoint,
             keys: Arc::new(keys),
             validations,
@@ -210,6 +222,13 @@ impl<P> OidcJwtVerifier<P> {
     /// Where tokens are revoked.
     pub fn revocation_endpoint(&self) -> &str {
         &self.well_known_endpoint.revocation_endpoint
+    }
+
+    /// The end-session endpoint at the internal address, for calls from this service itself,
+    /// e.g. Keycloak's logout with a refresh token; browsers use
+    /// [`WellKnownEndpoint::end_session_endpoint`].
+    pub fn internal_end_session_endpoint(&self) -> &str {
+        &self.internal_end_session_endpoint
     }
 
     /// Verifies `raw_token` and returns its payload untouched.
@@ -274,6 +293,21 @@ where
     }
 }
 
+/// `url` moved from under `issuer_url` to under `discovery_url`; unchanged if it is not under
+/// `issuer_url` or both are the same.
+fn rebase(url: &str, issuer_url: &str, discovery_url: &str) -> String {
+    let (public, internal) = (
+        issuer_url.trim_end_matches('/'),
+        discovery_url.trim_end_matches('/'),
+    );
+    match url.strip_prefix(public) {
+        Some(rest) if public != internal && (rest.is_empty() || rest.starts_with('/')) => {
+            format!("{internal}{rest}")
+        }
+        _ => url.to_owned(),
+    }
+}
+
 /// The discovery document served from `/.well-known/openid-configuration`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct WellKnownEndpoint {
@@ -306,23 +340,12 @@ impl WellKnownEndpoint {
     /// `issuer_url` to `discovery_url` when published under the former: inside a container
     /// network the public address is often unreachable. Browser-facing endpoints stay.
     fn rebase_server_endpoints(&mut self, issuer_url: &str, discovery_url: &str) {
-        let (public, internal) = (
-            issuer_url.trim_end_matches('/'),
-            discovery_url.trim_end_matches('/'),
-        );
-        if public == internal {
-            return;
-        }
         for endpoint in [
             &mut self.token_endpoint,
             &mut self.jwks_uri,
             &mut self.revocation_endpoint,
         ] {
-            if let Some(rest) = endpoint.strip_prefix(public)
-                && (rest.is_empty() || rest.starts_with('/'))
-            {
-                *endpoint = format!("{internal}{rest}");
-            }
+            *endpoint = rebase(endpoint, issuer_url, discovery_url);
         }
     }
 
@@ -633,6 +656,30 @@ mod tests {
         assert_eq!(
             endpoints.end_session_endpoint,
             format!("{public}/protocol/openid-connect/logout")
+        );
+    }
+
+    #[test]
+    fn given_an_endpoint_under_the_issuer_then_rebase_moves_it_to_the_discovery_address() {
+        let (public, internal) = (
+            "http://localhost:8080/realms/test",
+            "http://kc:8080/realms/test",
+        );
+        assert_eq!(
+            rebase(
+                &format!("{public}/protocol/openid-connect/logout"),
+                public,
+                internal
+            ),
+            format!("{internal}/protocol/openid-connect/logout")
+        );
+        assert_eq!(
+            rebase("https://elsewhere.example/logout", public, internal),
+            "https://elsewhere.example/logout"
+        );
+        assert_eq!(
+            rebase(&format!("{public}/x"), public, public),
+            format!("{public}/x")
         );
     }
 

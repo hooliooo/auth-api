@@ -28,3 +28,22 @@ services:
     depends_on:
       echo-api:
         condition: service_started
+  # A second BFF that trusts no proxy: from any address its client IP header is ignored, so
+  # tests can check a forged header changes nothing. Shares Redis and Keycloak with `bff`.
+  bff-untrusted:
+    extends:
+      file: docker-compose.yml
+      service: bff
+    container_name: bff-untrusted
+    ports: !override
+      - "5102:5100"
+    environment:
+      CLIENT_IP_HEADER: cf-connecting-ip
+      # TEST-NET-3: no connection ever comes from here.
+      TRUSTED_PROXIES: 203.0.113.1/32
+      LOGIN_RATE_LIMIT_PER_MINUTE: "10"
+    depends_on:
+      redis:
+        condition: service_healthy
+      keycloak-api:
+        condition: service_healthy

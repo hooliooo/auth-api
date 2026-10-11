@@ -49,6 +49,9 @@ pub enum AppError {
     /// No valid session.
     #[error("Not signed in")]
     Unauthorized,
+    /// An `/api/*` path that would leave the API's base URL, e.g. through `..`.
+    #[error("API path not allowed")]
+    InvalidApiPath,
 }
 
 impl IntoResponse for AppError {
@@ -62,16 +65,32 @@ impl IntoResponse for AppError {
             )
                 .into_response();
         }
-        let status = match &self {
-            AppError::LoginError(_) | AppError::Unauthorized => StatusCode::UNAUTHORIZED,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
+        let status = status_of(&self);
         if status.is_server_error() {
             error!(error = %self, "request failed");
         } else {
             debug!(error = %self, "request failed")
         }
         status.into_response()
+    }
+}
+
+/// The status `error` answers with: 4xx for the client's mistakes, 502 when the API or the
+/// identity provider failed, 503 when Redis or the API configuration is missing, 500 for the
+/// BFF's own failures.
+fn status_of(error: &AppError) -> StatusCode {
+    match error {
+        AppError::LoginError(_) | AppError::Unauthorized => StatusCode::UNAUTHORIZED,
+        AppError::InvalidApiPath => StatusCode::BAD_REQUEST,
+        AppError::ProxyRequestFailed(_) | AppError::RefreshAccessTokenFailed(_) => {
+            StatusCode::BAD_GATEWAY
+        }
+        AppError::Redis(_) | AppError::NoApiUrl => StatusCode::SERVICE_UNAVAILABLE,
+        #[cfg(feature = "rate-limit")]
+        AppError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
+        AppError::Header(_) | AppError::Json(_) | AppError::Response(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     }
 }
 
@@ -132,4 +151,31 @@ pub enum StartupError {
     /// The identity provider could not be set up.
     #[error(transparent)]
     Oidc(#[from] OidcSetupError),
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::error::{AppError, status_of};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn given_upstream_failures_then_they_are_gateway_errors_not_500() {
+        assert_eq!(
+            status_of(&AppError::ProxyRequestFailed("refused".into())),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status_of(&AppError::RefreshAccessTokenFailed("503".into())),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status_of(&AppError::NoApiUrl),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status_of(&AppError::InvalidApiPath),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(status_of(&AppError::Unauthorized), StatusCode::UNAUTHORIZED);
+    }
 }

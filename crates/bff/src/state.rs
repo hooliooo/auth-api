@@ -114,9 +114,9 @@ impl Oidc {
         self.verifier.token_endpoint()
     }
 
-    /// Where refresh tokens are revoked at logout.
-    pub fn revocation_endpoint(&self) -> &str {
-        self.verifier.revocation_endpoint()
+    /// Where the BFF itself ends a provider session at logout, at the internal address.
+    pub fn internal_end_session_endpoint(&self) -> &str {
+        self.verifier.internal_end_session_endpoint()
     }
 }
 

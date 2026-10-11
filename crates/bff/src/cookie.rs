@@ -50,7 +50,7 @@ pub fn clear(name: &str, same_site: &str) -> Result<HeaderValue, InvalidHeaderVa
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::cookie::login_cookie;
 
     #[test]
     fn given_two_states_then_their_login_cookies_differ_and_are_stable() {

@@ -10,10 +10,12 @@ use reqwest::{Method, StatusCode, header::CACHE_CONTROL};
 use serde_json::Value;
 
 use crate::support::{
-    Browser, arm_keycloak_fault, bff, end_keycloak_session, eventually, hash_key, index_members,
-    keycloak_refresh_status, location, login_cookie_name, login_url, now, open_sealed, query_param,
-    read_session, recorded_logout_tokens, redis, set_backchannel_logout_url, set_cookie, sign_in,
-    sign_in_until_callback, unverified_payload, wait_for_bff, write_session,
+    Browser, USERNAME, arm_keycloak_fault, bff, end_keycloak_session, eventually, hash_key,
+    index_members, keycloak_refresh_status, keycloak_session_idle_secs, keycloak_user_session_ids,
+    location, login_cookie_name, login_url, now, open_sealed, query_param, raw_get_status,
+    read_session, recorded_logout_tokens, redis, set_backchannel_logout_url, set_cookie,
+    set_realm_role, sign_in, sign_in_until_callback, untrusted_bff, unverified_payload,
+    wait_for_bff, write_session,
 };
 
 /// Asserts `response` forbids caching; `what` names it in the failure.
@@ -332,17 +334,16 @@ async fn given_a_logout_without_the_csrf_header_when_executing_then_it_should_be
 }
 
 #[tokio::test]
-async fn given_a_session_when_logging_out_then_it_ends_and_keycloak_logout_is_returned() {
+async fn given_a_session_when_logging_out_then_it_ends_here_and_at_keycloak_without_the_browser() {
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
     let sid = browser.cookie("__Host-bff").unwrap().to_owned();
     let keycloak_sid = keycloak_sid(&sid).await;
     assert!(index_members(&keycloak_sid).await.contains(&hash_key(&sid)));
-    let refresh_token = read_session(&sid).await.unwrap()["refresh_token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let session = read_session(&sid).await.unwrap();
+    let refresh_token = session["refresh_token"].as_str().unwrap().to_owned();
+    let user_id = session["sub"].as_str().unwrap().to_owned();
 
     let response = browser
         .post(bff("/auth/logout").as_str(), &[("x-bff-csrf", "1")])
@@ -356,14 +357,21 @@ async fn given_a_session_when_logging_out_then_it_ends_and_keycloak_logout_is_re
         "{cleared}"
     );
     let body: Value = response.json().await.unwrap();
-    let logout_url = reqwest::Url::parse(body["logoutUrl"].as_str().unwrap()).unwrap();
-    assert!(
-        logout_url
-            .path()
-            .ends_with("/protocol/openid-connect/logout"),
-        "{logout_url}"
+    assert_eq!(
+        body["logoutUrl"],
+        bff("/").as_str(),
+        "Keycloak was told server-side: the SPA just goes to its start page"
     );
-    assert!(query_param(&logout_url, "id_token_hint").is_some());
+    assert!(
+        !body.to_string().contains("id_token_hint"),
+        "no token for the browser to carry"
+    );
+    assert!(
+        !keycloak_user_session_ids(&user_id)
+            .await
+            .contains(&keycloak_sid),
+        "the Keycloak session is gone"
+    );
 
     assert!(raw_session(&sid).await.is_none(), "session key is deleted");
     assert!(
@@ -373,7 +381,7 @@ async fn given_a_session_when_logging_out_then_it_ends_and_keycloak_logout_is_re
     assert_eq!(
         keycloak_refresh_status(&refresh_token).await,
         StatusCode::BAD_REQUEST,
-        "logout revoked the refresh token at Keycloak"
+        "ending the Keycloak session invalidated the refresh token"
     );
     let session_response = browser.get(bff("/auth/session").as_str()).await;
     assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
@@ -668,7 +676,22 @@ async fn given_a_session_older_than_the_24_hour_cap_then_it_ends_even_when_activ
 }
 
 #[tokio::test]
-async fn given_an_active_session_then_each_request_restarts_the_idle_timeout() {
+async fn given_a_sign_in_then_the_session_lasts_as_long_as_keycloaks() {
+    wait_for_bff().await;
+    let idle = keycloak_session_idle_secs().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+
+    let ttl = session_ttl(&sid).await;
+    assert!(
+        (idle as i64 - 30..=idle as i64).contains(&ttl),
+        "the session ends with Keycloak's ({idle} s idle): ttl {ttl}"
+    );
+}
+
+#[tokio::test]
+async fn given_a_request_without_a_refresh_then_the_session_is_not_extended() {
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
@@ -683,7 +706,56 @@ async fn given_an_active_session_then_each_request_restarts_the_idle_timeout() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let ttl = session_ttl(&sid).await;
-    assert!(ttl > 3_500, "the idle timeout restarted: ttl {ttl}");
+    assert!(
+        ttl <= 100,
+        "only a refresh extends Keycloak's session, so only a refresh extends this one: ttl {ttl}"
+    );
+}
+
+#[tokio::test]
+async fn given_a_token_refresh_then_the_session_is_extended_with_keycloaks() {
+    wait_for_bff().await;
+    let idle = keycloak_session_idle_secs().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let mut session = read_session(&sid).await.unwrap();
+    session["expires_at"] = 0.into();
+    write_session(&sid, &session).await;
+    let mut redis = redis().await;
+    let _: () = redis
+        .expire(format!("bff:session:{}", hash_key(&sid)), 100)
+        .await
+        .unwrap();
+
+    let response = browser
+        .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let ttl = session_ttl(&sid).await;
+    assert!(
+        ttl > idle as i64 - 30,
+        "the refresh extended it to Keycloak's {idle} s: ttl {ttl}"
+    );
+}
+
+#[tokio::test]
+async fn given_dot_segments_in_an_api_path_then_they_are_refused() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let cookie = format!("__Host-bff={}", browser.cookie("__Host-bff").unwrap());
+
+    for path in [
+        "/api/../echo/x",
+        "/api/%2e%2e/echo/x",
+        "/api/echo/%2E%2E/%2e%2e/x",
+        "/api/..%5Cecho",
+    ] {
+        assert_eq!(raw_get_status(path, &cookie).await, 400, "{path}");
+    }
+    assert_eq!(raw_get_status("/api/echo/x", &cookie).await, 200);
 }
 
 #[tokio::test]
@@ -702,7 +774,11 @@ async fn given_keycloak_fails_during_a_refresh_then_the_session_survives_and_rec
         .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
         .await;
 
-    assert!(failed.status().is_server_error(), "{}", failed.status());
+    assert_eq!(
+        failed.status(),
+        StatusCode::BAD_GATEWAY,
+        "Keycloak failed, not the BFF"
+    );
     let kept = read_session(&sid).await.expect("the session is kept");
     assert_eq!(kept["refresh_token"], refresh_token.as_str());
 
@@ -811,4 +887,243 @@ async fn given_any_request_then_it_carries_a_request_id_through_to_the_api() {
         .await;
     let id = replaced.headers()["x-request-id"].to_str().unwrap();
     assert_ne!(id, "not an id", "text that is not an id is replaced");
+}
+
+#[tokio::test]
+async fn given_keycloak_fails_during_logout_then_the_browser_gets_keycloaks_logout_page_without_a_token()
+ {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let refresh_token = read_session(&sid).await.unwrap()["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    arm_keycloak_fault(&refresh_token, 503).await;
+
+    let response = browser
+        .post(bff("/auth/logout").as_str(), &[("x-bff-csrf", "1")])
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    let logout_url = reqwest::Url::parse(body["logoutUrl"].as_str().unwrap()).unwrap();
+    assert!(
+        logout_url
+            .path()
+            .ends_with("/protocol/openid-connect/logout"),
+        "the user finishes logging out at Keycloak: {logout_url}"
+    );
+    assert_eq!(
+        query_param(&logout_url, "client_id").as_deref(),
+        Some("bff")
+    );
+    assert!(
+        query_param(&logout_url, "id_token_hint").is_none(),
+        "no token in the URL"
+    );
+    assert!(
+        raw_session(&sid).await.is_none(),
+        "the BFF session ended anyway"
+    );
+}
+
+#[tokio::test]
+async fn given_single_use_refresh_tokens_then_each_refresh_keeps_the_rotated_token() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let mut used = Vec::new();
+
+    for _ in 0..2 {
+        // Keycloak dates tokens and sessions in whole seconds and only spots a used token that
+        // is older than the session's last refresh, so the steps must be a second apart.
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        let mut session = read_session(&sid).await.unwrap();
+        used.push(session["refresh_token"].as_str().unwrap().to_owned());
+        session["expires_at"] = 0.into();
+        write_session(&sid, &session).await;
+
+        let response = browser
+            .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "the refresh worked");
+    }
+
+    let current = read_session(&sid).await.unwrap()["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        !used.contains(&current),
+        "every refresh stored a new refresh token"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    for old in &used {
+        assert_eq!(
+            keycloak_refresh_status(old).await,
+            StatusCode::BAD_REQUEST,
+            "a used refresh token is refused"
+        );
+    }
+}
+
+#[tokio::test]
+async fn given_parallel_requests_with_an_expired_token_then_one_refresh_serves_them_all() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let mut session = read_session(&sid).await.unwrap();
+    let before = session["refresh_token"].as_str().unwrap().to_owned();
+    session["expires_at"] = 0.into();
+    write_session(&sid, &session).await;
+
+    // With single-use refresh tokens, two refreshes of the same token would end the session.
+    let mut calls = tokio::task::JoinSet::new();
+    for _ in 0..5 {
+        let request = reqwest::Client::new()
+            .get(bff("/api/echo/whoami"))
+            .header("cookie", format!("__Host-bff={sid}"))
+            .header("cf-connecting-ip", browser.client_ip.as_str());
+        calls.spawn(async move { request.send().await.unwrap().status() });
+    }
+    let statuses = calls.join_all().await;
+
+    assert!(
+        statuses.iter().all(|status| *status == StatusCode::OK),
+        "{statuses:?}"
+    );
+    let after = read_session(&sid).await.expect("the session survived");
+    assert_ne!(after["refresh_token"], before.as_str(), "it was refreshed");
+}
+
+#[tokio::test]
+async fn given_a_bff_that_trusts_no_proxy_then_a_forged_client_ip_header_is_ignored() {
+    wait_for_bff().await;
+    // Every request claims a different address. If the header were believed, each would get
+    // its own allowance; ignored, they all count against this machine's one address.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let mut statuses = Vec::new();
+    for attempt in 0..11 {
+        let response = client
+            .get(untrusted_bff("/auth/login?returnUrl=/"))
+            .header("cf-connecting-ip", format!("198.51.100.{attempt}"))
+            .send()
+            .await
+            .expect("the untrusting BFF is running; is docker-compose.test.yml in use?");
+        statuses.push(response.status());
+    }
+
+    assert!(
+        statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "11 sign-ins from one real address hit the limit of 10: {statuses:?}"
+    );
+}
+
+/// Hands verified payloads back untouched.
+struct RawPayload;
+
+impl oidc::ProviderClaims for RawPayload {
+    type Claims = Value;
+    fn claims(payload: Value) -> Result<Value, oidc::oidc::JwtVerificationError> {
+        Ok(payload)
+    }
+}
+
+#[tokio::test]
+async fn given_a_signed_in_user_then_the_api_accepts_the_access_token_the_bff_forwards() {
+    use oidc::oidc::JwtVerifier;
+
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+
+    let response = browser
+        .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
+        .await;
+    let echoed: Value = response.json().await.unwrap();
+    let forwarded = echoed["headers"]["authorization"]
+        .as_str()
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .expect("the API received a bearer token")
+        .to_owned();
+
+    // Verified exactly as the API verifies: Keycloak's keys, its issuer, the API's audience.
+    let api_verifier = oidc::OidcJwtVerifier::<RawPayload>::new(
+        "http://localhost:8080/realms/test",
+        reqwest::Client::new(),
+        "authentication.layer.api".to_owned(),
+        oidc::Transport::AllowInsecureHttp,
+    )
+    .await
+    .expect("the dev Keycloak is reachable");
+    let claims = api_verifier
+        .verify(&forwarded)
+        .await
+        .expect("the API's audience is in the BFF's access tokens");
+    assert_eq!(
+        claims["typ"], "Bearer",
+        "an access token, as the API requires"
+    );
+    assert_eq!(claims["azp"], "bff");
+    // Full scope is off: only the API's audience and the roles mapped to the client.
+    assert_eq!(
+        claims["aud"], "authentication.layer.api",
+        "no other audiences"
+    );
+    assert!(claims.get("resource_access").is_none(), "no client roles");
+    // alice's default roles stay out; the admin-role test may grant her the one mapped role
+    // while this test signs in.
+    let roles = claims["realm_access"]["roles"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        roles.iter().all(|role| role == "multi-tenancy-admin"),
+        "only roles mapped to the client: {roles:?}"
+    );
+
+    let id_token = read_session(&sid).await.unwrap()["id_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        unverified_payload(&id_token)["aud"],
+        "bff",
+        "ID tokens stay addressed to the BFF alone"
+    );
+}
+
+#[tokio::test]
+async fn given_a_user_with_the_apis_admin_role_then_only_that_role_reaches_the_api() {
+    wait_for_bff().await;
+    // Granted to alice only for this sign-in. Other tests signing in meanwhile may get it too;
+    // the only one that looks at roles allows for that.
+    set_realm_role(USERNAME, "multi-tenancy-admin", true).await;
+    let signed_in = tokio::spawn(async {
+        let mut browser = Browser::new();
+        sign_in(&mut browser, "/").await;
+        browser.cookie("__Host-bff").unwrap().to_owned()
+    })
+    .await;
+    set_realm_role(USERNAME, "multi-tenancy-admin", false).await;
+    let sid = signed_in.unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()));
+
+    let access_token = read_session(&sid).await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let claims = unverified_payload(&access_token);
+    assert_eq!(
+        claims["realm_access"]["roles"],
+        serde_json::json!(["multi-tenancy-admin"]),
+        "the mapped role, and none of alice's default roles"
+    );
 }

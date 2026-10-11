@@ -167,6 +167,8 @@ struct TokenResponse {
     id_token: String,
     /// Renews `access_token`; absent if the client may not refresh.
     refresh_token: Option<String>,
+    /// Seconds until `refresh_token`, and with it the provider's session, expires.
+    refresh_expires_in: Option<u64>,
 }
 
 /// The ID token claims the BFF checks or keeps.
@@ -378,6 +380,7 @@ async fn complete_sign_in(
             expires_at: issued_at + token_response.expires_in,
             created_at: issued_at,
         },
+        session::lifetime_secs(token_response.refresh_expires_in),
     )
     .await?;
 
@@ -433,12 +436,15 @@ async fn exchange_code(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LogoutResponse {
-    /// Where the SPA navigates to sign out of the identity provider too.
+    /// Where the SPA navigates next: its start page, or the provider's logout page if the
+    /// provider could not be told.
     logout_url: String,
 }
 
-/// Ends `current_session`, revokes its refresh token and returns the provider's logout URL.
-/// `app_state` has Redis and the provider.
+/// Ends `current_session` here and at the identity provider, server to server, so no token
+/// passes through the browser. `logoutUrl` is then the app's start page; if the provider could
+/// not be reached, it is the provider's own logout page instead, without a token, where the
+/// user confirms. `app_state` has Redis and the provider.
 async fn logout(
     State(app_state): State<AppState>,
     current_session: CurrentSession,
@@ -451,21 +457,25 @@ async fn logout(
     )
     .await?;
 
-    if let Some(refresh_token) = current_session.session.refresh_token.as_deref() {
-        revoke_best_effort(&app_state, refresh_token).await;
-    }
-
-    let mut url = app_state.oidc.end_session_url.clone();
-    url.query_pairs_mut()
-        .append_pair("id_token_hint", &current_session.session.id_token)
-        .append_pair(
-            "post_logout_redirect_uri",
-            app_state.oidc.public_base_url.as_str(),
-        )
-        .append_pair("client_id", app_state.client_id());
+    let ended_at_provider = match current_session.session.refresh_token.as_deref() {
+        Some(refresh_token) => end_provider_session(&app_state, refresh_token).await,
+        None => false,
+    };
+    let logout_url = if ended_at_provider {
+        app_state.oidc.public_base_url.clone()
+    } else {
+        let mut url = app_state.oidc.end_session_url.clone();
+        url.query_pairs_mut()
+            .append_pair("client_id", app_state.client_id())
+            .append_pair(
+                "post_logout_redirect_uri",
+                app_state.oidc.public_base_url.as_str(),
+            );
+        url
+    };
 
     let mut response = Json(LogoutResponse {
-        logout_url: url.to_string(),
+        logout_url: logout_url.to_string(),
     })
     .into_response();
     response
@@ -474,24 +484,31 @@ async fn logout(
     Ok(no_store(response))
 }
 
-/// Revokes `refresh_token` at `app_state`'s provider; failures are only logged, since the
-/// session is already gone.
-async fn revoke_best_effort(app_state: &AppState, refresh_token: &str) {
+/// Ends the provider session `refresh_token` belongs to, at `app_state`'s provider, server to
+/// server (Keycloak's logout with a refresh token). This also invalidates the refresh token and
+/// tells the session's other clients through back-channel logout. `false` if it failed; that is
+/// only logged, since the BFF's session is already gone.
+async fn end_provider_session(app_state: &AppState, refresh_token: &str) -> bool {
     let result = app_state
         .http
-        .post(app_state.oidc.revocation_endpoint())
+        .post(app_state.oidc.internal_end_session_endpoint())
         .form(&[
-            ("token", refresh_token),
-            ("token_type_hint", "refresh_token"),
+            ("refresh_token", refresh_token),
             ("client_id", app_state.client_id()),
             ("client_secret", app_state.client_secret()),
         ])
         .send()
         .await;
     match result {
-        Ok(r) if r.status().is_success() => {}
-        Ok(r) => warn!(status = %r.status(), "refresh token revocation rejected"),
-        Err(err) => warn!(%err, "refresh token revocation failed"),
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            warn!(status = %response.status(), "the identity provider refused the logout");
+            false
+        }
+        Err(error) => {
+            warn!(%error, "the identity provider could not be reached for logout");
+            false
+        }
     }
 }
 
@@ -583,9 +600,9 @@ fn check_id_token(claims: &IdTokenClaims, client_id: &str) -> Result<(), LoginEr
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
-    use super::*;
+    use crate::auth::{IdTokenClaims, check_id_token};
 
     /// Valid ID token claims for client `bff`, changed by `extra`; a `null` removes a claim.
     fn id_token(extra: Value) -> IdTokenClaims {

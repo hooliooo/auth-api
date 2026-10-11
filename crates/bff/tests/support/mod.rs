@@ -558,3 +558,113 @@ pub async fn keycloak_refresh_status(refresh_token: &str) -> StatusCode {
         .expect("Keycloak is reachable")
         .status()
 }
+
+/// The test realm's SSO session idle timeout, which the BFF's sessions follow.
+pub async fn keycloak_session_idle_secs() -> u64 {
+    let realm: Value = Client::new()
+        .get(format!("{}/admin/realms/test", keycloak_base()))
+        .bearer_auth(keycloak_admin_token().await)
+        .send()
+        .await
+        .expect("Keycloak is reachable")
+        .json()
+        .await
+        .unwrap();
+    realm["ssoSessionIdleTimeout"]
+        .as_u64()
+        .expect("an idle timeout")
+}
+
+/// The status of a `GET` to `path` sent byte for byte, unlike an HTTP client, which would
+/// resolve `..` and `%2e%2e` before sending. `cookie` is the `Cookie` header's value.
+pub async fn raw_get_status(path: &str, cookie: &str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let base = bff_base();
+    let address = format!(
+        "{}:{}",
+        base.host_str().unwrap(),
+        base.port_or_known_default().unwrap()
+    );
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {}\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n",
+        base.host_str().unwrap()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let status_line = String::from_utf8_lossy(&response);
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .expect("an HTTP status line")
+}
+
+/// The ids of Keycloak's live sessions for user `user_id`.
+pub async fn keycloak_user_session_ids(user_id: &str) -> Vec<String> {
+    let sessions: Vec<Value> = Client::new()
+        .get(format!(
+            "{}/admin/realms/test/users/{user_id}/sessions",
+            keycloak_base()
+        ))
+        .bearer_auth(keycloak_admin_token().await)
+        .send()
+        .await
+        .expect("Keycloak is reachable")
+        .json()
+        .await
+        .unwrap();
+    sessions
+        .iter()
+        .filter_map(|session| session["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// The BFF instance that trusts no proxy (`E2E_UNTRUSTED_BFF_URL`), for URL `path`.
+pub fn untrusted_bff(path: &str) -> String {
+    let base =
+        std::env::var("E2E_UNTRUSTED_BFF_URL").unwrap_or_else(|_| "http://localhost:5102".into());
+    format!("{base}{path}")
+}
+
+/// Grants (`granted`) or removes realm role `role` for user `username`.
+pub async fn set_realm_role(username: &str, role: &str, granted: bool) {
+    let http = Client::new();
+    let token = keycloak_admin_token().await;
+    let realm_url = format!("{}/admin/realms/test", keycloak_base());
+    let users: Vec<Value> = http
+        .get(format!("{realm_url}/users?username={username}&exact=true"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = users[0]["id"].as_str().expect("the user exists").to_owned();
+    let role_representation: Value = http
+        .get(format!("{realm_url}/roles/{role}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mappings = format!("{realm_url}/users/{user_id}/role-mappings/realm");
+    let request = if granted {
+        http.post(mappings)
+    } else {
+        http.delete(mappings)
+    };
+    let status = request
+        .bearer_auth(&token)
+        .json(&[role_representation])
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "changing {username}'s roles: {status}");
+}

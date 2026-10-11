@@ -17,10 +17,21 @@ use crate::{
     state::AppState,
 };
 
-/// A session ends after this long without a request; each request restarts the clock.
-pub const SSO_IDLE_SECS: u64 = 3_600;
-/// A session ends this long after sign-in, however active.
+/// How long a session lasts when the identity provider does not say (no
+/// `refresh_expires_in`). Otherwise a session ends exactly when the provider's would.
+const DEFAULT_LIFETIME_SECS: u64 = 3_600;
+/// The BFF's own cap: a session ends this long after sign-in, whatever the provider allows.
 pub const SSO_MAX_SECS: u64 = 24 * 3_600;
+
+/// How long to keep a session after a token response whose refresh token lives
+/// `refresh_expires_in` seconds: that long, as the provider's session ends with it.
+pub fn lifetime_secs(refresh_expires_in: Option<u64>) -> u64 {
+    match refresh_expires_in {
+        Some(secs) if secs > 0 => secs,
+        // Absent, or 0 for tokens that never expire on their own (e.g. offline tokens).
+        _ => DEFAULT_LIFETIME_SECS,
+    }
+}
 /// Refresh the access token when it has less than this left.
 const REFRESH_ACCESS_TOKEN_AHEAD_SECS: u64 = 60;
 /// How long one instance may hold a session's refresh lock; longer than any refresh call.
@@ -99,15 +110,11 @@ fn seal(sid: &str, session: &Session) -> Result<Vec<u8>, AppError> {
     )?)
 }
 
-/// The session `sid` from `redis`, restarting its idle timeout; `None` if it is missing, does
-/// not open, or is past the 24-hour cap (then it is deleted).
+/// The session `sid` from `redis`; `None` if it is missing, does not open, or is past the
+/// 24-hour cap (then it is deleted). Reading does not extend it: only a token refresh does,
+/// as only a refresh extends the provider's session.
 pub async fn load(redis: &mut ConnectionManager, sid: &str) -> Result<Option<Session>, AppError> {
-    let raw: Option<Vec<u8>> = redis::cmd("GETEX")
-        .arg(session_key(&hash_key(sid)))
-        .arg("EX")
-        .arg(SSO_IDLE_SECS)
-        .query_async(redis)
-        .await?;
+    let raw: Option<Vec<u8>> = redis.get(session_key(&hash_key(sid))).await?;
     let Some(plaintext) = raw.and_then(|raw| sealed::open(sid, Purpose::Session, &raw)) else {
         return Ok(None);
     };
@@ -121,16 +128,18 @@ pub async fn load(redis: &mut ConnectionManager, sid: &str) -> Result<Option<Ses
     Ok(Some(session))
 }
 
-/// Stores `session` in `redis` under `sid` and adds it to its provider session's index.
+/// Stores `session` in `redis` under `sid` for `lifetime_secs`, and adds it to its provider
+/// session's index.
 pub async fn save(
     redis: &mut ConnectionManager,
     sid: &str,
     session: &Session,
+    lifetime_secs: u64,
 ) -> Result<(), AppError> {
     let hashed = hash_key(sid);
     let mut pipe = redis::pipe();
     pipe.atomic()
-        .set_ex(session_key(&hashed), seal(sid, session)?, SSO_IDLE_SECS)
+        .set_ex(session_key(&hashed), seal(sid, session)?, lifetime_secs)
         .ignore();
 
     if let Some(kc_sid) = session.sid.as_deref() {
@@ -284,6 +293,8 @@ struct RefreshResponse {
     id_token: Option<String>,
     /// Seconds until the new access token expires.
     expires_in: u64,
+    /// Seconds until the refresh token, and with it the provider's session, expires.
+    refresh_expires_in: Option<u64>,
 }
 
 /// Refreshes session `sid`'s access token while holding `lock`, using `redis` and
@@ -356,7 +367,7 @@ async fn refresh_locked(
         .key(session_key(&hash_key(sid)))
         .arg(&lock.token)
         .arg(seal(sid, &session)?)
-        .arg(SSO_IDLE_SECS)
+        .arg(lifetime_secs(response.refresh_expires_in))
         .invoke_async(redis)
         .await?;
     if written == 0 {
@@ -364,4 +375,20 @@ async fn refresh_locked(
         return Ok(None);
     }
     Ok(Some(session.access_token))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::session::{DEFAULT_LIFETIME_SECS, lifetime_secs};
+
+    #[test]
+    fn given_the_providers_refresh_lifetime_then_the_session_lasts_as_long() {
+        assert_eq!(lifetime_secs(Some(600)), 600);
+    }
+
+    #[test]
+    fn given_no_or_an_unlimited_refresh_lifetime_then_the_default_applies() {
+        assert_eq!(lifetime_secs(None), DEFAULT_LIFETIME_SECS);
+        assert_eq!(lifetime_secs(Some(0)), DEFAULT_LIFETIME_SECS);
+    }
 }

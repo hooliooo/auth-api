@@ -37,6 +37,11 @@ $kcadm create realms \
   -s ssoSessionIdleTimeout=600 $(: 'refresh token (cf. https://stackoverflow.com/q/52040265/') \
   -s ssoSessionMaxLifespan=864000 \
   \
+  $(: 'Realm Settings -> Tokens -> Refresh tokens: every refresh returns a new refresh token,') \
+  $(: 'and each one can be used exactly once (a replayed one is refused).') \
+  -s revokeRefreshToken=true \
+  -s refreshTokenMaxReuse=0 \
+  \
   -s organizationsEnabled=true
 
 $kcadm update realms/$realm -s attributes='{ "adminEventsExpiration": "0" }'
@@ -90,6 +95,7 @@ echo "* $bff_client_id"
     \"directAccessGrantsEnabled\": false,
     \"serviceAccountsEnabled\": false,
     \"frontchannelLogout\": false,
+    \"fullScopeAllowed\": false,
     \"redirectUris\": [\"$bff_base_url/auth/callback\"],
     \"attributes\": {
       \"pkce.code.challenge.method\": \"S256\",
@@ -98,6 +104,26 @@ echo "* $bff_client_id"
       \"backchannel.logout.session.required\": \"true\"
     }
   }"
+
+  # The BFF forwards its users' access tokens to the API, so they must name the API as audience.
+  # Access tokens only: ID tokens stay addressed to the BFF alone.
+  bff_client_uuid=$($kcadm get -r $realm clients 2>/dev/null | jq -r '.[] | select(.clientId == "'"$bff_client_id"'") | .id')
+  $kcadm create -r $realm clients/$bff_client_uuid/protocol-mappers/models -f - <<EOF
+    {
+     "name": "$bff_client_id-auth-layer-aud",
+     "protocol": "openid-connect",
+     "protocolMapper": "oidc-audience-mapper",
+     "config": {
+       "included.client.audience": "$api_client_id",
+       "id.token.claim": "false",
+       "access.token.claim": "true"
+     }
+    }
+EOF
+
+  # Full scope is off: tokens carry only the roles mapped here, i.e. the ones the API acts on.
+  $kcadm create -r $realm clients/$bff_client_uuid/scope-mappings/realm \
+    -b "[$($kcadm get -r $realm roles/multi-tenancy-admin)]"
 
   echo "* test user"
   $kcadm create users -r $realm -s username=alice -s email=alice@example.com \
