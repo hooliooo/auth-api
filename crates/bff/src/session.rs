@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::warn;
 
+use crate::metrics;
 use crate::{
     cookie,
     crypto::hash_key,
@@ -331,16 +332,23 @@ async fn refresh_locked(
         ])
         .send()
         .await
-        .map_err(|e| AppError::RefreshAccessTokenFailed(e.to_string()))?;
+        .map_err(|e| {
+            metrics::counter("bff_token_refreshes_total", &[("outcome", "failed")]);
+            AppError::RefreshAccessTokenFailed(e.to_string())
+        })?;
 
     match response.status() {
-        status if status.is_success() => {}
+        status if status.is_success() => {
+            metrics::counter("bff_token_refreshes_total", &[("outcome", "refreshed")]);
+        }
         StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED => {
+            metrics::counter("bff_token_refreshes_total", &[("outcome", "rejected")]);
             warn!(status = %response.status(), "refresh token rejected; ending session");
             delete(redis, sid, session.sid.as_deref()).await?;
             return Ok(None);
         }
         status => {
+            metrics::counter("bff_token_refreshes_total", &[("outcome", "failed")]);
             return Err(AppError::RefreshAccessTokenFailed(format!(
                 "token endpoint returned {status}"
             )));

@@ -84,6 +84,10 @@ echo "e2e client uuid: $end_to_end_client_uuid"
 add_auth_layer_aud_mapper_to_client "$end_to_end_client_uuid" "$end_to_end_client_id"
 
 echo "* $bff_client_id"
+  # Client scopes: the defaults are in every token whatever the BFF asks for, so only what the
+  # API needs: the subject and session (basic), roles, and acr. profile and email are optional,
+  # for a BFF configured to request them (OIDC_SCOPES); web-origins, offline_access, phone,
+  # address and the rest are not available to this client at all.
   $kcadm create -r $realm clients -f - <<<"
   {
     \"clientId\": \"$bff_client_id\",
@@ -96,6 +100,8 @@ echo "* $bff_client_id"
     \"serviceAccountsEnabled\": false,
     \"frontchannelLogout\": false,
     \"fullScopeAllowed\": false,
+    \"defaultClientScopes\": [\"basic\", \"roles\", \"acr\"],
+    \"optionalClientScopes\": [\"profile\", \"email\"],
     \"redirectUris\": [\"$bff_base_url/auth/callback\"],
     \"attributes\": {
       \"pkce.code.challenge.method\": \"S256\",

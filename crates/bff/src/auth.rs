@@ -26,6 +26,9 @@ use std::net::SocketAddr;
 #[cfg(feature = "rate-limit")]
 use axum::extract::ConnectInfo;
 
+use redis::AsyncCommands;
+
+use crate::metrics;
 #[cfg(feature = "rate-limit")]
 use crate::rate_limit;
 use crate::sealed;
@@ -277,7 +280,7 @@ async fn login(
         .append_pair("client_id", s.client_id())
         .append_pair("redirect_uri", s.redirect_uri())
         .append_pair("state", &state)
-        .append_pair("scope", "openid profile email")
+        .append_pair("scope", &s.oidc.config.scopes)
         .append_pair("nonce", &nonce)
         .append_pair("code_challenge", challenge.as_str())
         .append_pair("code_challenge_method", challenge.name());
@@ -299,8 +302,12 @@ async fn callback(
 ) -> Response {
     let login_cookie = q.state.as_deref().map(cookie::login_cookie);
     match complete_sign_in(state, headers, q).await {
-        Ok(response) => response,
+        Ok(response) => {
+            metrics::counter("bff_sign_ins_total", &[("outcome", "completed")]);
+            response
+        }
         Err(error) => {
+            metrics::counter("bff_sign_ins_total", &[("outcome", "failed")]);
             warn!(%error, "sign-in could not be completed");
             let mut response = Redirect::to(LOGIN_FAILED_PATH).into_response();
             if let Some(Ok(clear)) = login_cookie.map(|name| cookie::clear(&name, "Lax")) {
@@ -461,6 +468,12 @@ async fn logout(
         Some(refresh_token) => end_provider_session(&app_state, refresh_token).await,
         None => false,
     };
+    let provider = if ended_at_provider {
+        "ended"
+    } else {
+        "unreachable"
+    };
+    metrics::counter("bff_logouts_total", &[("provider", provider)]);
     let logout_url = if ended_at_provider {
         app_state.oidc.public_base_url.clone()
     } else {
@@ -519,9 +532,25 @@ struct LogoutTokenForm {
     logout_token: String,
 }
 
-/// Ends every session of the provider session named in `form`'s logout token, once per
-/// token. `app_state` has Redis and the verifier.
+/// `POST /auth/backchannel-logout`: ends every session of the provider session named in
+/// `form`'s logout token, once per token, and counts the outcome. `state` is the app state.
 async fn backchannel_logout(
+    state: State<AppState>,
+    form: Form<LogoutTokenForm>,
+) -> Result<StatusCode, AppError> {
+    let result = end_backchannel_sessions(state, form).await;
+    let outcome = match &result {
+        Ok(_) => "accepted",
+        Err(AppError::LoginError(LoginError::InvalidBackchannelLogoutToken)) => "replayed",
+        Err(_) => "invalid",
+    };
+    metrics::counter("bff_backchannel_logouts_total", &[("outcome", outcome)]);
+    result
+}
+
+/// The work of [`backchannel_logout`]: verifies `form`'s logout token and ends its sessions,
+/// using `app_state`'s Redis and verifier.
+async fn end_backchannel_sessions(
     State(app_state): State<AppState>,
     Form(form): Form<LogoutTokenForm>,
 ) -> Result<StatusCode, AppError> {
@@ -538,20 +567,17 @@ async fn backchannel_logout(
     let iam_sid = claims.sid.ok_or(LoginError::MissingSid)?;
     let mut redis = app_state.redis.clone();
 
-    // Each logout token is accepted once: a captured token replayed later is refused.
-    let first_use: Option<String> = redis::cmd("SET")
-        .arg(format!("bff:logout-jti:{}", hash_key(&claims.jti)))
-        .arg(1)
-        .arg("NX")
-        .arg("EX")
-        .arg(LOGOUT_JTI_TTL_SECS)
-        .query_async(&mut redis)
-        .await?;
-    if first_use.is_none() {
+    // Each logout token is accepted once: a captured token replayed later is refused. It is
+    // marked as used only after its sessions are gone, so if deleting them fails, the
+    // provider's retry of the same token still goes through.
+    let used_key = format!("bff:logout-jti:{}", hash_key(&claims.jti));
+    if redis.exists::<_, bool>(&used_key).await? {
         return Err(LoginError::InvalidBackchannelLogoutToken.into());
     }
-
     let removed = session::delete_by_iam_sid(&mut redis, &iam_sid).await?;
+    redis
+        .set_ex::<_, _, ()>(&used_key, 1, LOGOUT_JTI_TTL_SECS)
+        .await?;
     info!(removed, "backchannel logout ended sessions");
     Ok(StatusCode::OK)
 }

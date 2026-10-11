@@ -135,10 +135,30 @@ pub(crate) struct OidcConfig {
     pub redirect_uri: String,
     /// Whether `http://` URLs are accepted for Keycloak and the BFF's own redirect URI.
     pub transport: Transport,
+    /// `OIDC_SCOPES`: the scopes every sign-in requests, space-separated; never the browser's
+    /// choice.
+    pub scopes: String,
+}
+
+/// The scopes to request, from the `OIDC_SCOPES` value `setting` (default `openid`): must
+/// include `openid`, and never `offline_access`, whose refresh tokens are made to outlive the
+/// session they came from.
+fn scopes_from(setting: Option<&str>) -> Result<String, StartupError> {
+    let scopes: Vec<&str> = setting.unwrap_or("openid").split_whitespace().collect();
+    if !scopes.contains(&"openid") {
+        return Err(StartupError::InvalidScopes("they must include openid"));
+    }
+    if scopes.contains(&"offline_access") {
+        return Err(StartupError::InvalidScopes(
+            "offline_access is refused: sessions end with the provider's",
+        ));
+    }
+    Ok(scopes.join(" "))
 }
 
 impl OidcConfig {
-    /// Reads and validates the settings; HTTP URLs only with `ALLOW_INSECURE_HTTP=true`.
+    /// Reads and validates the settings; HTTP URLs only with `ALLOW_INSECURE_HTTP=true`, and
+    /// scopes as [`scopes_from`] allows.
     pub fn from_env() -> Result<Self, StartupError> {
         let issuer = env::env("ISSUER_URI")?;
         // Plain HTTP only when explicitly allowed, for a local dev stack.
@@ -155,11 +175,36 @@ impl OidcConfig {
         }
         Ok(OidcConfig {
             transport,
+            scopes: scopes_from(std::env::var("OIDC_SCOPES").ok().as_deref())?,
             discover_url: env::env("DISCOVERY_URI").unwrap_or_else(|_| issuer.clone()),
             issuer,
             client_id: env::env("CLIENT_ID")?,
             client_secret: env::env("CLIENT_SECRET")?,
             redirect_uri,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn given_no_setting_then_only_openid_is_requested() {
+        assert_eq!(scopes_from(None).unwrap(), "openid");
+    }
+
+    #[test]
+    fn given_extra_scopes_then_they_are_requested_normalised() {
+        assert_eq!(
+            scopes_from(Some("openid  email\tprofile")).unwrap(),
+            "openid email profile"
+        );
+    }
+
+    #[test]
+    fn given_no_openid_or_offline_access_then_startup_is_refused() {
+        assert!(scopes_from(Some("email profile")).is_err());
+        assert!(scopes_from(Some("openid offline_access")).is_err());
     }
 }

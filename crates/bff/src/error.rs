@@ -148,6 +148,9 @@ pub enum StartupError {
     /// `CLIENT_IP_HEADER` is set without `TRUSTED_PROXIES`.
     #[error("CLIENT_IP_HEADER needs TRUSTED_PROXIES: the proxies allowed to set it")]
     UntrustedClientIpHeader,
+    /// `OIDC_SCOPES` cannot be used; holds why.
+    #[error("invalid OIDC_SCOPES: {0}")]
+    InvalidScopes(&'static str),
     /// The identity provider could not be set up.
     #[error(transparent)]
     Oidc(#[from] OidcSetupError),

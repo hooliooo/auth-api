@@ -15,6 +15,9 @@ services:
       KEYCLOAK_URL: http://keycloak-api:8080
       BACKCHANNEL_TARGET: http://bff:5100/auth/backchannel-logout
   bff:
+    # Metrics, reached by the tests (E2E_METRICS_URL); never published on the public port.
+    ports:
+      - "5191:9100"
     environment:
       API_BASE_URL: http://echo-api:8000
       # Server-to-server Keycloak calls go through the proxy, so tests can make them fail.

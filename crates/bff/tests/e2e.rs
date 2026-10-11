@@ -12,9 +12,9 @@ use serde_json::Value;
 use crate::support::{
     Browser, USERNAME, arm_keycloak_fault, bff, end_keycloak_session, eventually, hash_key,
     index_members, keycloak_refresh_status, keycloak_session_idle_secs, keycloak_user_session_ids,
-    location, login_cookie_name, login_url, now, open_sealed, query_param, raw_get_status,
-    read_session, recorded_logout_tokens, redis, set_backchannel_logout_url, set_cookie,
-    set_realm_role, sign_in, sign_in_until_callback, untrusted_bff, unverified_payload,
+    location, login_cookie_name, login_url, metric, metrics_page, now, open_sealed, query_param,
+    raw_get_status, read_session, recorded_logout_tokens, redis, set_backchannel_logout_url,
+    set_cookie, set_realm_role, sign_in, sign_in_until_callback, untrusted_bff, unverified_payload,
     wait_for_bff, write_session,
 };
 
@@ -99,11 +99,10 @@ async fn given_a_login_request_when_handled_then_it_redirects_to_keycloak_with_p
         Some(43)
     );
 
-    assert!(
-        query_param(&authorize, "scope")
-            .unwrap()
-            .split(' ')
-            .any(|s| s == "openid")
+    assert_eq!(
+        query_param(&authorize, "scope").as_deref(),
+        Some("openid"),
+        "the BFF's configured scopes (OIDC_SCOPES), nothing more"
     );
 
     assert!(query_param(&authorize, "nonce").is_some());
@@ -1073,6 +1072,21 @@ async fn given_a_signed_in_user_then_the_api_accepts_the_access_token_the_bff_fo
         "an access token, as the API requires"
     );
     assert_eq!(claims["azp"], "bff");
+    // Only openid is requested and the client's default scopes are basic, roles and acr: no
+    // personal data and no CORS origins ride along to the API.
+    for absent in [
+        "email",
+        "name",
+        "preferred_username",
+        "given_name",
+        "family_name",
+        "allowed-origins",
+    ] {
+        assert!(
+            claims.get(absent).is_none(),
+            "{absent} is not in the access token"
+        );
+    }
     // Full scope is off: only the API's audience and the roles mapped to the client.
     assert_eq!(
         claims["aud"], "authentication.layer.api",
@@ -1125,5 +1139,78 @@ async fn given_a_user_with_the_apis_admin_role_then_only_that_role_reaches_the_a
         claims["realm_access"]["roles"],
         serde_json::json!(["multi-tenancy-admin"]),
         "the mapped role, and none of alice's default roles"
+    );
+}
+
+#[tokio::test]
+async fn given_the_metrics_page_then_it_is_served_only_on_its_own_address() {
+    wait_for_bff().await;
+    let public = reqwest::get(bff("/metrics")).await.unwrap();
+    assert_eq!(
+        public.status(),
+        StatusCode::NOT_FOUND,
+        "not on the public port"
+    );
+
+    let page = metrics_page().await;
+    assert!(
+        page.contains("# TYPE bff_http_requests_total counter"),
+        "{page}"
+    );
+    assert!(page.contains("# TYPE bff_http_request_duration_seconds histogram"));
+}
+
+#[tokio::test]
+async fn given_sign_ins_api_calls_and_refreshes_then_they_are_counted() {
+    wait_for_bff().await;
+    let sign_ins = r#"bff_sign_ins_total{outcome="completed"}"#;
+    let refreshes = r#"bff_token_refreshes_total{outcome="refreshed"}"#;
+    let api_calls = r#"bff_http_requests_total{route="/api/{*rest}",method="GET",status="200"}"#;
+    let before = metrics_page().await;
+
+    let mut browser = Browser::new();
+    sign_in(&mut browser, "/").await;
+    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let mut session = read_session(&sid).await.unwrap();
+    session["expires_at"] = 0.into();
+    write_session(&sid, &session).await;
+    let response = browser
+        .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Other tests run at the same time, so the counts grow by at least this test's share.
+    let after = metrics_page().await;
+    for series in [sign_ins, refreshes, api_calls] {
+        assert!(
+            metric(&after, series) >= metric(&before, series) + 1.0,
+            "{series} counted"
+        );
+    }
+    assert!(
+        after.contains(
+            r#"bff_http_request_duration_seconds_bucket{route="/api/{*rest}",method="GET",le="+Inf"}"#
+        ),
+        "API calls are timed"
+    );
+}
+
+#[tokio::test]
+async fn given_a_sign_in_asking_for_other_scopes_then_the_bff_requests_only_its_own() {
+    wait_for_bff().await;
+    let mut browser = Browser::new();
+
+    let response = browser
+        .get(&format!(
+            "{}&scope=openid%20offline_access%20email",
+            login_url("/")
+        ))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        query_param(&location(&response), "scope").as_deref(),
+        Some("openid"),
+        "the browser has no say in the scopes"
     );
 }

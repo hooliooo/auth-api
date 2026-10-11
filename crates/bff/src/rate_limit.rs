@@ -4,7 +4,7 @@ use std::net::IpAddr;
 
 use redis::aio::ConnectionManager;
 
-use crate::{error::AppError, session::now};
+use crate::{error::AppError, metrics, session::now};
 
 /// Length of one counting window.
 const WINDOW_SECS: u64 = 60;
@@ -34,6 +34,7 @@ pub async fn check_login(
         .query_async(redis)
         .await?;
     if count > u64::from(per_minute) {
+        metrics::counter("bff_rate_limited_total", &[]);
         let retry_after = WINDOW_SECS - now % WINDOW_SECS;
         return Err(AppError::TooManyRequests { retry_after });
     }

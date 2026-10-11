@@ -5,11 +5,13 @@ edition = "2024"
 publish = false
 
 [features]
-default = ["e2e", "rate-limit"]
+default = ["e2e", "metrics", "rate-limit"]
 e2e = []
 # Per-client limit on sign-in starts, kept in Redis. Leave it out when something in front,
 # such as Cloudflare, already limits /auth/login.
 rate-limit = []
+# Prometheus metrics on a separate address (METRICS_ADDR); no extra dependencies.
+metrics = []
 
 [dependencies]
 async-trait.workspace        = true

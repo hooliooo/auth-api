@@ -147,6 +147,9 @@ pub struct Cache {
     /// Held across the fetch, so concurrent refreshes wait for one another. Guards the time of
     /// the last attempt, which the cooldown is measured from.
     last_refresh: Mutex<Instant>,
+    /// When the last fetch finished, readable without waiting for [`Self::last_refresh`]: during
+    /// a cooldown, lookups learn there is nothing to do without queueing on that lock.
+    last_finished: RwLock<Instant>,
     /// How old the keys may get before a lookup refreshes them.
     ttl: Duration,
     /// The cooldown: the least time between two fetches, however many lookups ask for one.
@@ -167,6 +170,7 @@ impl Cache {
             source: Box::new(source),
             keys: RwLock::new(Arc::new(keys)),
             last_refresh: Mutex::new(now),
+            last_finished: RwLock::new(now),
             ttl,
             min_refresh_interval,
         })
@@ -208,6 +212,18 @@ impl Cache {
     /// not passed. Returns the keys to use (the previous ones if the fetch failed) and this
     /// call's fetch failure, if any.
     async fn refresh(&self, seen: &Arc<Keys>) -> (Arc<Keys>, Option<SourceError>) {
+        // Fast path: a fetch finished within the cooldown and the keys are still the ones seen,
+        // so there is nothing to do. Without it, every lookup during a provider outage would
+        // queue on the lock only to learn that. A fetch still in flight has not finished, so
+        // lookups then wait for its result instead, e.g. a key the provider just rotated in.
+        let finished = *self
+            .last_finished
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if finished.elapsed() < self.min_refresh_interval && Arc::ptr_eq(&self.snapshot(), seen) {
+            return (seen.clone(), None);
+        }
+
         let mut last_refresh = self.last_refresh.lock().await;
 
         // Another request refreshed while this one waited for the lock
@@ -220,7 +236,12 @@ impl Cache {
         }
 
         *last_refresh = Instant::now();
-        match self.source.fetch().await {
+        let fetched = self.source.fetch().await;
+        *self
+            .last_finished
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Instant::now();
+        match fetched {
             Ok(set) => {
                 let fresh = Arc::new(Keys::from_set(&set, Instant::now()));
                 *self.keys.write().unwrap_or_else(PoisonError::into_inner) = fresh.clone();
@@ -414,6 +435,35 @@ mod tests {
             result,
             Err(JwtVerificationError::ProviderUnavailable(_))
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn given_a_failed_refresh_when_looked_up_during_the_cooldown_then_it_does_not_wait_for_the_lock()
+     {
+        let state = CacheTestState::new(&["a"]).await;
+        tokio::time::advance(TTL).await;
+        state.serve(None);
+        assert!(state.cache.key("a").await.is_ok(), "the old key is kept");
+
+        // As if another lookup were stuck holding the refresh lock.
+        let _held = state.cache.last_refresh.lock().await;
+        let lookup = tokio::time::timeout(Duration::from_secs(1), state.cache.key("a")).await;
+
+        assert!(lookup.is_ok(), "answered without queueing on the lock");
+        assert_eq!(state.fetches(), 2, "and without another fetch");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn given_a_fetch_in_flight_when_its_new_key_is_looked_up_then_it_waits_for_the_result() {
+        let state = CacheTestState::new(&["a"]).await;
+        tokio::time::advance(COOLDOWN).await;
+        state.serve(Some(key_set(&["a", "b"])));
+
+        // Both ask for the rotated-in key at once; the second must not skip the in-flight fetch.
+        let (first, second) = tokio::join!(state.cache.key("b"), state.cache.key("b"));
+
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(state.fetches(), 2);
     }
 
     #[tokio::test(start_paused = true)]

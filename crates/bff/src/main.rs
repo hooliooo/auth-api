@@ -25,6 +25,7 @@ mod csrf;
 mod env;
 mod error;
 mod health;
+mod metrics;
 mod pkce;
 mod proxy;
 mod random;
@@ -90,7 +91,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(auth::routes())
         .merge(proxy::routes())
         .merge(health::routes())
-        .layer(middleware::from_fn(csrf::require_header))
+        .layer(middleware::from_fn(csrf::require_header));
+    // Outside the CSRF check, so refused requests are counted too.
+    #[cfg(feature = "metrics")]
+    let app = app.layer(middleware::from_fn(metrics::track));
+    let app = app
         // Outermost, so even requests the CSRF check refuses get an id.
         .layer(middleware::from_fn(request_id::assign))
         .with_state(state);
@@ -100,6 +105,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| StartupError::InvalidSetting("LISTEN_ADDR"))?;
     let listener = TcpListener::bind(listen_addr).await?;
     info!("Listening on {}", listener.local_addr()?);
+
+    #[cfg(feature = "metrics")]
+    {
+        let metrics_addr: SocketAddr = std::env::var("METRICS_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:9100".to_owned())
+            .parse()
+            .map_err(|_| StartupError::InvalidSetting("METRICS_ADDR"))?;
+        tokio::spawn(metrics::serve(metrics_addr));
+    }
 
     // The peer address is the fallback client IP for rate limiting and X-Forwarded-For.
     axum::serve(

@@ -668,3 +668,26 @@ pub async fn set_realm_role(username: &str, role: &str, granted: bool) {
         .status();
     assert!(status.is_success(), "changing {username}'s roles: {status}");
 }
+
+/// The test stack BFF's metrics page (`E2E_METRICS_URL`, default `http://localhost:5191/metrics`).
+pub async fn metrics_page() -> String {
+    let url =
+        std::env::var("E2E_METRICS_URL").unwrap_or_else(|_| "http://localhost:5191/metrics".into());
+    Client::new()
+        .get(url)
+        .send()
+        .await
+        .expect("the metrics address is reachable; is docker-compose.test.yml in use?")
+        .text()
+        .await
+        .unwrap()
+}
+
+/// The value of the sample `series` (name and labels, exactly as rendered) on metrics `page`;
+/// 0 if it has not been recorded yet.
+pub fn metric(page: &str, series: &str) -> f64 {
+    page.lines()
+        .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0.0)
+}

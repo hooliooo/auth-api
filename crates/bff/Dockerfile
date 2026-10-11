@@ -1,7 +1,7 @@
 FROM rust:1.99-trixie AS build
 WORKDIR /src
 # Cargo features of the image; e.g. --build-arg FEATURES= for a build without the rate limit.
-ARG FEATURES=rate-limit
+ARG FEATURES=metrics,rate-limit
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \

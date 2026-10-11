@@ -35,7 +35,9 @@ sign-in.
 | `REDIRECT_URI` | yes | | the BFF's public callback, e.g. `https://app.example.com/auth/callback` |
 | `REDIS_URI` | yes | | e.g. `redis://redis:6379` |
 | `API_BASE_URL` | no | | where `/api/*` goes; without it `/api/*` fails |
+| `OIDC_SCOPES` | no | `openid` | scopes every sign-in requests, space-separated; must include `openid`, never `offline_access`. The browser cannot change them |
 | `LISTEN_ADDR` | no | `0.0.0.0:5100` | address and port to listen on |
+| `METRICS_ADDR` | no | `0.0.0.0:9100` | where Prometheus metrics are served (`GET /metrics`), apart from the public port (needs the `metrics` feature) |
 | `ALLOW_INSECURE_HTTP` | no | `false` | `true` accepts `http://` Keycloak URLs and redirect URI; local development only |
 | `CLIENT_IP_HEADER` | no | | header a reverse proxy puts the client's IP in, e.g. `x-real-ip` or `cf-connecting-ip`; see below |
 | `TRUSTED_PROXIES` | with `CLIENT_IP_HEADER` | | comma-separated addresses or ranges (`10.42.0.0/16`) allowed to set that header |
@@ -44,7 +46,10 @@ sign-in.
 
 The Keycloak client needs standard flow with PKCE (S256), the redirect URI above, and a
 back-channel logout URL of `<BFF>/auth/backchannel-logout` with "session required" on;
-For the API to accept the forwarded tokens, it also needs an audience mapper adding the API's
+Its default client scopes are only `basic`, `roles` and `acr` (default scopes are in every token,
+whatever is requested), with `profile` and `email` optional for a BFF configured to request
+them; `web-origins`, `offline_access` and the rest are not assigned. For the API to accept the
+forwarded tokens, it also needs an audience mapper adding the API's
 audience (`authentication.layer.api`) to access tokens, not ID tokens. "Full scope allowed" is
 off, so tokens carry only the roles mapped to the client: in the dev realm, `multi-tenancy-admin`,
 the one role the API acts on.
@@ -57,10 +62,11 @@ session under a Redis lock, so parallel requests never spend the same token twic
 | Feature | Default | Meaning |
 |---|---|---|
 | `rate-limit` | on | per-IP limit on `/auth/login`, kept in Redis; leave it out if e.g. Cloudflare already limits it |
+| `metrics` | on | Prometheus metrics on `METRICS_ADDR`: requests by route and status, request durations, sign-ins, token refreshes, logouts, back-channel logouts and rate-limit refusals; no extra dependencies |
 | `e2e` | on | compiles the end-to-end tests |
 
-The Docker image builds with `--build-arg FEATURES=rate-limit` (the default); pass
-`--build-arg FEATURES=` for an image without the rate limit.
+The Docker image builds with `--build-arg FEATURES=metrics,rate-limit` (the default); pass e.g.
+`--build-arg FEATURES=metrics` for an image without the rate limit.
 
 ## Running behind a reverse proxy
 
