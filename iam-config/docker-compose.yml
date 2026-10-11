@@ -55,7 +55,11 @@ services:
       bash -c '
         echo "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
         echo "$(date -Is) Starting iam/setup_configuration.sh..." 
-        bash /mnt/iam/setup_configuration.sh
+        # A failed setup must fail the container, not end in a successful "Finished" line.
+        bash /mnt/iam/setup_configuration.sh || {
+          echo "$(date -Is) FAILED iam/setup_configuration.sh; see the output above."
+          exit 1
+        }
         echo "$(date -Is) Finished iam/setup_configuration.sh."
         echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
       '

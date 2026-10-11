@@ -8,11 +8,7 @@ all-features = true
 # Every RustSec advisory fails the check, including unmaintained and yanked crates, unless
 # listed here with a reason.
 yanked = "deny"
-ignore = [
-    # Marvin attack: timing leaks in RSA *private-key* operations. jsonwebtoken pulls in `rsa`
-    # but these services only verify signatures, a public-key operation. No fixed version exists.
-    { id = "RUSTSEC-2023-0071", reason = "only RSA signature verification is used; no private-key operations" },
-]
+ignore = []
 
 [licenses]
 # Permissive licenses only.

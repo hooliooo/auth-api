@@ -1,5 +1,7 @@
 #!/bin/bash
-set -eu
+# pipefail: a pipeline fails if any command in it does, not only the last one (e.g. a failing
+# setup piped into tee, or a failing kcadm piped into jq).
+set -euo pipefail
 source shared_functions.sh
 
 echo "

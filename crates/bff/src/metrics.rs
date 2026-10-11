@@ -11,14 +11,21 @@
 //! - `bff_rate_limited_total`: sign-in starts refused by the rate limit.
 
 #[cfg(feature = "metrics")]
-pub use enabled::*;
+pub use imp::{serve, track};
 
-#[cfg(not(feature = "metrics"))]
-pub use disabled::*;
+/// Adds one to counter `name` with `labels`. Without the `metrics` feature it does nothing, so
+/// callers need no `cfg` of their own.
+pub fn counter(name: &'static str, labels: &[(&'static str, &str)]) {
+    #[cfg(feature = "metrics")]
+    imp::count(name, labels);
+    #[cfg(not(feature = "metrics"))]
+    let _ = (name, labels);
+}
 
-/// What [`counter`] and the request middleware record, kept in one registry per process.
+/// The registry, the request middleware and the metrics server; only with the `metrics`
+/// feature.
 #[cfg(feature = "metrics")]
-mod enabled {
+mod imp {
     use std::{
         collections::BTreeMap,
         fmt::Write,
@@ -111,8 +118,8 @@ mod enabled {
         f(&mut REGISTRY.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
-    /// Adds one to counter `name` with `labels`.
-    pub fn counter(name: &'static str, labels: &[(&'static str, &str)]) {
+    /// Adds one to counter `name` with `labels` in the registry.
+    pub(super) fn count(name: &'static str, labels: &[(&'static str, &str)]) {
         let labels = labels
             .iter()
             .map(|(key, value)| (*key, (*value).to_owned()))
@@ -250,19 +257,12 @@ mod enabled {
 
         #[test]
         fn given_recorded_counters_then_they_render_with_help_type_and_labels() {
-            counter("bff_sign_ins_total", &[("outcome", "completed")]);
-            counter("bff_sign_ins_total", &[("outcome", "completed")]);
+            count("bff_sign_ins_total", &[("outcome", "completed")]);
+            count("bff_sign_ins_total", &[("outcome", "completed")]);
             let rendered = render();
             assert!(rendered.contains("# TYPE bff_sign_ins_total counter"));
             assert!(rendered.contains("bff_sign_ins_total{outcome=\"completed\"} "));
             assert!(rendered.contains("# TYPE bff_http_request_duration_seconds histogram"));
         }
     }
-}
-
-/// No-op stand-ins, so callers need no `cfg` of their own.
-#[cfg(not(feature = "metrics"))]
-mod disabled {
-    /// Does nothing without the `metrics` feature; `_name` and `_labels` are ignored.
-    pub fn counter(_name: &'static str, _labels: &[(&'static str, &str)]) {}
 }
