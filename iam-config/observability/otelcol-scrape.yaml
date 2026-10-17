@@ -1,0 +1,14 @@
+# Merged over the image's /otel-lgtm/otelcol-config.yaml
+receivers:
+  prometheus/services:
+    config:
+      scrape_configs:
+        - job_name: keycloak
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["keycloak-api:9000"]
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp, prometheus/collector, prometheus/services]
