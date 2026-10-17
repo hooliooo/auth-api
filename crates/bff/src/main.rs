@@ -28,6 +28,7 @@ mod error;
 mod health;
 mod metrics;
 mod pkce;
+mod provider;
 mod proxy;
 mod random;
 #[cfg(feature = "rate-limit")]

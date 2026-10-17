@@ -10,7 +10,6 @@ use axum::{
     http::{HeaderMap, Request, header},
     response::Response,
 };
-use jwt::keycloak::KeycloakJwtVerifier;
 use kern::infrastructure::event::event_bus::TokioEventBus;
 use oidc::oidc::JwtVerifier;
 use tower_http::{
@@ -20,7 +19,7 @@ use tower_http::{
 use tracing::{Span, info_span};
 use write_model::database_setup;
 
-use crate::{Transport, auth::JwtVerifierState, health, organization};
+use crate::{IdentityProvider, Transport, auth::JwtVerifierState, health, organization};
 
 /// The state every router shares. Dependencies used across resources, like the JWT verifier,
 /// live here once; each resource's handlers pull their own slice out with `FromRef`.
@@ -54,8 +53,9 @@ pub async fn build(
     database_url: &str,
     audience: &str,
     transport: Transport,
+    provider: IdentityProvider,
 ) -> Router {
-    let state = build_state(oauth2_url, database_url, audience, transport).await;
+    let state = build_state(oauth2_url, database_url, audience, transport, provider).await;
     router(state)
 }
 
@@ -118,19 +118,19 @@ async fn build_state(
     database_url: &str,
     audience: &str,
     transport: Transport,
+    provider: IdentityProvider,
 ) -> AppState {
-    // Keycloak is called while verifying tokens, so a hung Keycloak must fail those requests
-    // instead of holding them open.
+    // The identity provider is called while verifying tokens, so a hung provider must fail
+    // those requests instead of holding them open.
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_secs(5))
         .build()
         .expect("Failed to build the HTTP client");
-    let keycloak_jwt_verifier =
-        KeycloakJwtVerifier::new(oauth2_url, client, audience.to_string(), transport)
-            .await
-            .expect("Failed to read the Keycloak well-known configuration");
-    let verifier = Arc::new(keycloak_jwt_verifier);
+    let verifier = provider
+        .verifier(oauth2_url, client, audience.to_string(), transport)
+        .await
+        .expect("Failed to read the identity provider's well-known configuration");
 
     let authorization_service = Arc::new(AuthAPIAuthorizationService);
     // Local Event Sourcing

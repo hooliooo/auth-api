@@ -15,5 +15,6 @@ tokio.workspace       = true
 uuid.workspace        = true
 validator.workspace   = true
 
-[dev-dependencies]
-mockall.workspace = true
+[features]
+# In-memory port implementations for other crates' tests
+test-support = []

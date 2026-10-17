@@ -2,6 +2,7 @@
 
 use crate::client_auth::{ClientAuth, ClientAuthError};
 use crate::client_ip::ClientIpSource;
+use crate::provider::IdentityProvider;
 use oidc::{OidcJwtVerifier, ProviderClaims, Transport};
 use redis::aio::ConnectionManager;
 use reqwest::{Client, Url};
@@ -79,8 +80,8 @@ pub(crate) struct Oidc {
     pub public_base_url: Url,
     /// Where the browser signs in.
     pub authorization_url: Url,
-    /// Where the browser signs out of the provider.
-    pub end_session_url: Url,
+    /// Where the browser signs out of the provider, if it publishes such a page.
+    pub end_session_url: Option<Url>,
 }
 
 impl Oidc {
@@ -103,7 +104,11 @@ impl Oidc {
         let authorization_url = Url::parse(&well_known.authorization_endpoint)
             .map_err(|_| StartupError::InvalidUrl("authorization_url"))?;
 
-        let end_session_url = Url::parse(&well_known.end_session_endpoint)
+        let end_session_url = well_known
+            .end_session_endpoint
+            .as_deref()
+            .map(Url::parse)
+            .transpose()
             .map_err(|_| StartupError::InvalidUrl("end_session_url"))?;
         Ok(Self {
             config,
@@ -120,8 +125,13 @@ impl Oidc {
     }
 
     /// Where the BFF itself ends a provider session at logout, at the internal address.
-    pub fn internal_end_session_endpoint(&self) -> &str {
+    pub fn internal_end_session_endpoint(&self) -> Option<&str> {
         self.verifier.internal_end_session_endpoint()
+    }
+
+    /// Where the BFF revokes a refresh token at logout.
+    pub fn revocation_endpoint(&self) -> Option<&str> {
+        self.verifier.revocation_endpoint()
     }
 }
 
@@ -138,11 +148,13 @@ pub(crate) struct OidcConfig {
     pub client_auth: ClientAuth,
     /// `REDIRECT_URI`: the BFF's public sign-in callback.
     pub redirect_uri: String,
-    /// Whether `http://` URLs are accepted for Keycloak and the BFF's own redirect URI.
+    /// Whether `http://` URLs are accepted for the provider and the BFF's own redirect URI.
     pub transport: Transport,
     /// `OIDC_SCOPES`: the scopes every sign-in requests, space-separated; never the browser's
     /// choice.
     pub scopes: String,
+    /// `IDENTITY_PROVIDER`: what the provider adds to, or leaves out of, the standards.
+    pub provider: IdentityProvider,
 }
 
 /// The scopes to request, from the `OIDC_SCOPES` value `setting` (default `openid`): must
@@ -186,6 +198,7 @@ impl OidcConfig {
             client_id: env::env("CLIENT_ID")?,
             client_auth: ClientAuth::from_env()?,
             redirect_uri,
+            provider: IdentityProvider::from_env()?,
         })
     }
 }

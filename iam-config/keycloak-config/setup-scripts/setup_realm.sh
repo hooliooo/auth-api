@@ -92,6 +92,15 @@ echo "* $bff_client_id"
   # address and the rest are not available to this client at all.
   # No client secret: the BFF authenticates with assertions signed by its private key
   # (private_key_jwt); Keycloak fetches the public key from the BFF's JWKS URL.
+  # Every BFF origin that may sign in: the BFF, plus any in space-separated
+  # `bff_extra_base_urls` (e.g. the e2e stack's BFF for a standard OpenID Connect provider).
+  bff_redirect_uris=""
+  bff_post_logout_uris=""
+  for url in $bff_base_url ${bff_extra_base_urls:-}; do
+    bff_redirect_uris+="${bff_redirect_uris:+,}\"$url/auth/callback\""
+    bff_post_logout_uris+="${bff_post_logout_uris:+##}$url/"
+  done
+
   $kcadm create -r $realm clients -f - <<<"
   {
     \"clientId\": \"$bff_client_id\",
@@ -106,10 +115,10 @@ echo "* $bff_client_id"
     \"fullScopeAllowed\": false,
     \"defaultClientScopes\": [\"basic\", \"roles\", \"acr\"],
     \"optionalClientScopes\": [\"profile\", \"email\"],
-    \"redirectUris\": [\"$bff_base_url/auth/callback\"],
+    \"redirectUris\": [$bff_redirect_uris],
     \"attributes\": {
       \"pkce.code.challenge.method\": \"S256\",
-      \"post.logout.redirect.uris\": \"$bff_base_url/\",
+      \"post.logout.redirect.uris\": \"$bff_post_logout_uris\",
       \"backchannel.logout.url\": \"$bff_internal_url/auth/backchannel-logout\",
       \"backchannel.logout.session.required\": \"true\",
       \"use.jwks.url\": \"true\",

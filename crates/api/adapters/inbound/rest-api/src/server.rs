@@ -3,7 +3,7 @@
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{Transport, app};
+use crate::{IdentityProvider, Transport, app};
 
 pub async fn run(
     listener: TcpListener,
@@ -11,9 +11,10 @@ pub async fn run(
     database_url: &str,
     audience: &str,
     transport: Transport,
+    provider: IdentityProvider,
 ) -> Result<(), std::io::Error> {
     init_tracing();
-    let app = app::build(oauth2_url, database_url, audience, transport).await;
+    let app = app::build(oauth2_url, database_url, audience, transport, provider).await;
     let address = listener.local_addr().unwrap();
     tracing::debug!("listening on {}", address);
     axum::serve(listener, app)

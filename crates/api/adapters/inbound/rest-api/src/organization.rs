@@ -15,6 +15,7 @@ use kern::application::event::EventPublisher;
 use crate::AppState;
 
 pub mod create;
+pub mod provision;
 
 /// The Organization routes, nested under `/organizations`.
 pub fn router() -> Router<AppState> {

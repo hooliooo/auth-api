@@ -131,7 +131,7 @@ pub struct OidcJwtVerifier<P> {
     /// The end-session endpoint at the internal address this service reaches the provider at
     /// (the discovery address), for logging a session out server to server; the published one
     /// is for browsers.
-    internal_end_session_endpoint: String,
+    internal_end_session_endpoint: Option<String>,
 }
 
 impl<P> OidcJwtVerifier<P> {
@@ -172,11 +172,10 @@ impl<P> OidcJwtVerifier<P> {
         let mut well_known_endpoint = well_known_endpoint;
         well_known_endpoint.rebase_server_endpoints(issuer_url, discovery_url);
         well_known_endpoint.check_transport(transport)?;
-        let internal_end_session_endpoint = rebase(
-            &well_known_endpoint.end_session_endpoint,
-            issuer_url,
-            discovery_url,
-        );
+        let internal_end_session_endpoint = well_known_endpoint
+            .end_session_endpoint
+            .as_deref()
+            .map(|endpoint| rebase(endpoint, issuer_url, discovery_url));
 
         let source = HttpJwksSource::new(client, well_known_endpoint.jwks_uri.clone());
         let keys = Cache::new(source, KEY_TTL, KEY_MIN_REFRESH_INTERVAL).await?;
@@ -219,16 +218,16 @@ impl<P> OidcJwtVerifier<P> {
         &self.well_known_endpoint.token_endpoint
     }
 
-    /// Where tokens are revoked.
-    pub fn revocation_endpoint(&self) -> &str {
-        &self.well_known_endpoint.revocation_endpoint
+    /// Where tokens are revoked, if the provider publishes it.
+    pub fn revocation_endpoint(&self) -> Option<&str> {
+        self.well_known_endpoint.revocation_endpoint.as_deref()
     }
 
     /// The end-session endpoint at the internal address, for calls from this service itself,
     /// e.g. Keycloak's logout with a refresh token; browsers use
-    /// [`WellKnownEndpoint::end_session_endpoint`].
-    pub fn internal_end_session_endpoint(&self) -> &str {
-        &self.internal_end_session_endpoint
+    /// [`WellKnownEndpoint::end_session_endpoint`]. `None` if the provider publishes none.
+    pub fn internal_end_session_endpoint(&self) -> Option<&str> {
+        self.internal_end_session_endpoint.as_deref()
     }
 
     /// Verifies `raw_token` and returns its payload untouched.
@@ -317,12 +316,12 @@ pub struct WellKnownEndpoint {
     pub authorization_endpoint: String,
     /// Where codes and refresh tokens are exchanged.
     pub token_endpoint: String,
-    /// Where the browser signs out.
-    pub end_session_endpoint: String,
+    /// Where the browser signs out (RP-Initiated Logout); not every provider publishes one.
+    pub end_session_endpoint: Option<String>,
     /// The provider's public signing keys.
     pub jwks_uri: String,
-    /// Where tokens are revoked.
-    pub revocation_endpoint: String,
+    /// Where tokens are revoked (RFC 7009); not every provider publishes one.
+    pub revocation_endpoint: Option<String>,
 }
 
 impl WellKnownEndpoint {
@@ -331,20 +330,27 @@ impl WellKnownEndpoint {
     fn check_transport(&self, transport: Transport) -> Result<(), OidcSetupError> {
         transport.check("authorization_endpoint", &self.authorization_endpoint)?;
         transport.check("token_endpoint", &self.token_endpoint)?;
-        transport.check("end_session_endpoint", &self.end_session_endpoint)?;
         transport.check("jwks_uri", &self.jwks_uri)?;
-        transport.check("revocation_endpoint", &self.revocation_endpoint)
+        for (name, endpoint) in [
+            ("end_session_endpoint", &self.end_session_endpoint),
+            ("revocation_endpoint", &self.revocation_endpoint),
+        ] {
+            if let Some(endpoint) = endpoint {
+                transport.check(name, endpoint)?;
+            }
+        }
+        Ok(())
     }
 
     /// Moves the endpoints this service calls itself (token, keys, revocation) from
     /// `issuer_url` to `discovery_url` when published under the former: inside a container
     /// network the public address is often unreachable. Browser-facing endpoints stay.
     fn rebase_server_endpoints(&mut self, issuer_url: &str, discovery_url: &str) {
-        for endpoint in [
-            &mut self.token_endpoint,
-            &mut self.jwks_uri,
-            &mut self.revocation_endpoint,
-        ] {
+        let revocation = self.revocation_endpoint.as_mut();
+        for endpoint in [&mut self.token_endpoint, &mut self.jwks_uri]
+            .into_iter()
+            .chain(revocation)
+        {
             *endpoint = rebase(endpoint, issuer_url, discovery_url);
         }
     }
@@ -522,9 +528,9 @@ mod tests {
             issuer: ISSUER.to_owned(),
             authorization_endpoint: endpoint("auth"),
             token_endpoint: endpoint("token"),
-            end_session_endpoint: endpoint("logout"),
+            end_session_endpoint: Some(endpoint("logout")),
             jwks_uri: endpoint("certs"),
-            revocation_endpoint: endpoint("revoke"),
+            revocation_endpoint: Some(endpoint("revoke")),
         };
         OidcJwtVerifier::from_parts(well_known, cache, AUDIENCE)
     }
@@ -608,9 +614,9 @@ mod tests {
             issuer: "https://idp.example/realms/test".into(),
             authorization_endpoint: endpoint("auth"),
             token_endpoint: endpoint("token"),
-            end_session_endpoint: endpoint("logout"),
+            end_session_endpoint: Some(endpoint("logout")),
             jwks_uri: endpoint("certs"),
-            revocation_endpoint: endpoint("revoke"),
+            revocation_endpoint: Some(endpoint("revoke")),
         };
         assert!(endpoints.check_transport(Transport::HttpsOnly).is_ok());
         endpoints.jwks_uri = "http://idp.example/realms/test/certs".into();
@@ -624,6 +630,20 @@ mod tests {
     }
 
     #[test]
+    fn given_a_provider_without_logout_or_revocation_endpoints_then_discovery_accepts_it() {
+        let endpoints: WellKnownEndpoint = serde_json::from_value(json!({
+            "issuer": "https://idp.example",
+            "authorization_endpoint": "https://idp.example/authorize",
+            "token_endpoint": "https://idp.example/token",
+            "jwks_uri": "https://idp.example/keys",
+        }))
+        .unwrap();
+        assert_eq!(endpoints.end_session_endpoint, None);
+        assert_eq!(endpoints.revocation_endpoint, None);
+        assert!(endpoints.check_transport(Transport::HttpsOnly).is_ok());
+    }
+
+    #[test]
     fn given_a_separate_discovery_address_then_only_server_endpoints_move_to_it() {
         let public = "http://localhost:8080/realms/test";
         let internal = "http://keycloak:8080/realms/test";
@@ -631,9 +651,9 @@ mod tests {
             issuer: public.into(),
             authorization_endpoint: format!("{public}/protocol/openid-connect/auth"),
             token_endpoint: format!("{public}/protocol/openid-connect/token"),
-            end_session_endpoint: format!("{public}/protocol/openid-connect/logout"),
+            end_session_endpoint: Some(format!("{public}/protocol/openid-connect/logout")),
             jwks_uri: "http://keycloak:8080/realms/test/protocol/openid-connect/certs".into(),
-            revocation_endpoint: format!("{public}/protocol/openid-connect/revoke"),
+            revocation_endpoint: Some(format!("{public}/protocol/openid-connect/revoke")),
         };
         endpoints.rebase_server_endpoints(public, internal);
 
@@ -643,7 +663,7 @@ mod tests {
         );
         assert_eq!(
             endpoints.revocation_endpoint,
-            format!("{internal}/protocol/openid-connect/revoke")
+            Some(format!("{internal}/protocol/openid-connect/revoke"))
         );
         assert_eq!(
             endpoints.jwks_uri,
@@ -655,7 +675,7 @@ mod tests {
         );
         assert_eq!(
             endpoints.end_session_endpoint,
-            format!("{public}/protocol/openid-connect/logout")
+            Some(format!("{public}/protocol/openid-connect/logout"))
         );
     }
 
@@ -689,9 +709,9 @@ mod tests {
             issuer: "http://idp/realms/test".into(),
             authorization_endpoint: String::new(),
             token_endpoint: "http://idp/realms/test-other/token".into(),
-            end_session_endpoint: String::new(),
+            end_session_endpoint: None,
             jwks_uri: String::new(),
-            revocation_endpoint: String::new(),
+            revocation_endpoint: None,
         };
         endpoints.rebase_server_endpoints("http://idp/realms/test", "http://internal/realms/test");
         assert_eq!(

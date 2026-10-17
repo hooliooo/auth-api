@@ -3,10 +3,9 @@ use std::sync::Arc;
 use auth_core::{
     application::{
         authentication::Claims,
-        authorization::{AuthorizedRequest, authorized_scope::AuthorizedScope},
-        organization::{commands::CreateOrganization, create::CreateOrganizationError},
+        authorization::{AuthAPIAuthorizationService, authorized_scope::AuthorizedScope},
     },
-    domain::{exception::RepositoryWriteError, organization::OrganizationId},
+    test_support::{InMemoryOrganizationWriteRepository, RecordingEventPublisher},
 };
 use axum::{
     Router,
@@ -14,19 +13,10 @@ use axum::{
     extract::Request,
     http,
 };
-use kern::{
-    application::use_case::UseCase, infrastructure::error::axum_extensions::StatusCodeError,
-};
-use mockall::mock;
+use kern::infrastructure::error::axum_extensions::StatusCodeError;
 use oidc::oidc::{JwtVerificationError, JwtVerifier};
 use reqwest::StatusCode;
-use rest_api::{
-    AppState,
-    organization::{
-        OrganizationState,
-        create::{CreateOrganizationApplicationService, CreateOrganizationState},
-    },
-};
+use rest_api::{AppState, organization::OrganizationState};
 use serde_json::from_slice;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -36,60 +26,48 @@ use crate::common::{TEST_HTTP_CLIENT, TestEnv, load_env_and_extract_access_token
 
 mod common;
 
-fn setup_state(created_id: Uuid) -> Router {
-    setup_state_returning(move || Ok(OrganizationId::new(created_id)))
+fn setup_state() -> Router {
+    setup_state_with(
+        AuthorizedScope::SuperAdmin,
+        InMemoryOrganizationWriteRepository::default(),
+    )
 }
 
-fn setup_state_returning(
-    mut result: impl FnMut() -> Result<OrganizationId, CreateOrganizationError> + Send + 'static,
+fn setup_state_with(
+    scope: AuthorizedScope,
+    repository: InMemoryOrganizationWriteRepository,
 ) -> Router {
-    let mut use_case = MockTestCreateOrganizationUseCase::new();
-    use_case.expect_handle().returning(move |_req| result());
+    let organization = OrganizationState::new(
+        Arc::new(AuthAPIAuthorizationService),
+        Arc::new(RecordingEventPublisher::default()),
+        Arc::new(repository),
+    );
 
-    let mut jwt_verifier = MockTestJwtVerifier::new();
-    jwt_verifier.expect_verify().return_once(|_req| {
-        let authorized_scope = AuthorizedScope::SuperAdmin;
+    rest_api::organization::router().with_state(AppState::new(
+        Arc::new(StaticJwtVerifier(scope)),
+        organization,
+    ))
+}
+
+/// Accepts any token as a caller with the given scope.
+struct StaticJwtVerifier(AuthorizedScope);
+
+#[async_trait::async_trait]
+impl JwtVerifier for StaticJwtVerifier {
+    type Claims = Claims;
+
+    async fn verify(&self, _raw_token: &str) -> Result<Claims, JwtVerificationError> {
         Ok(Claims {
             client_id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),
-            authorized_scope,
+            authorized_scope: self.0.clone(),
         })
-    });
-
-    let organization = OrganizationState {
-        create: CreateOrganizationState {
-            use_case: Arc::new(use_case) as Arc<CreateOrganizationApplicationService>,
-        },
-    };
-
-    rest_api::organization::router().with_state(AppState::new(Arc::new(jwt_verifier), organization))
-}
-
-mock! {
-    pub TestCreateOrganizationUseCase {}
-
-    #[async_trait::async_trait]
-    impl UseCase for TestCreateOrganizationUseCase {
-        type Request = AuthorizedRequest<CreateOrganization>;
-        type Response = Result<OrganizationId, CreateOrganizationError>;
-
-        async fn handle(&self, request: AuthorizedRequest<CreateOrganization>) -> Result<OrganizationId, CreateOrganizationError>;
-    }
-}
-
-mock! {
-    pub TestJwtVerifier {}
-
-    #[async_trait::async_trait]
-    impl JwtVerifier for TestJwtVerifier {
-        type Claims = Claims;
-        async fn verify(&self, raw_token: &str) -> Result<Claims, JwtVerificationError>;
     }
 }
 
 #[tokio::test]
 async fn given_a_create_organization_request_with_an_invalid_id_when_sent_then_it_should_fail() {
-    let router = setup_state(Uuid::new_v4());
+    let router = setup_state();
 
     let response = router
         .oneshot(
@@ -132,8 +110,8 @@ async fn given_a_create_organization_request_with_an_invalid_id_when_sent_then_i
 
 #[tokio::test]
 async fn given_a_valid_create_organization_request_when_processed_then_it_should_succeed() {
-    let created_id = Uuid::new_v4();
-    let router: Router = setup_state(created_id);
+    let created_id = Uuid::now_v7();
+    let router: Router = setup_state();
     let response = router
         .oneshot(
             Request::builder()
@@ -145,7 +123,7 @@ async fn given_a_valid_create_organization_request_when_processed_then_it_should
                     r###"
                     {{
                         "id": "{created_id}",
-                        "name": "Test",
+                        "name": "organization-a",
                         "display_name": "Test",
                         "description": "test",
                         "is_enabled": true,
@@ -185,7 +163,7 @@ fn create_request(id: Uuid, host: Option<&str>) -> Request {
             r###"
             {{
                 "id": "{id}",
-                "name": "Test",
+                "name": "organization-a",
                 "display_name": "Test",
                 "description": "test",
                 "is_enabled": true,
@@ -199,7 +177,7 @@ fn create_request(id: Uuid, host: Option<&str>) -> Request {
 #[tokio::test]
 async fn given_a_host_header_when_created_then_the_location_should_stay_relative() {
     let created_id = Uuid::now_v7();
-    let router = setup_state(created_id);
+    let router = setup_state();
 
     let response = router
         .oneshot(create_request(created_id, Some("api.example.com")))
@@ -215,15 +193,13 @@ async fn given_a_host_header_when_created_then_the_location_should_stay_relative
 
 #[tokio::test]
 async fn given_a_taken_name_when_created_then_it_should_conflict_on_the_name() {
-    let router = setup_state_returning(|| {
-        Err(CreateOrganizationError::Database(
-            RepositoryWriteError::AlreadyExists {
-                entity: "organization".to_string(),
-                field: "name",
-                value: "Test".to_string(),
-            },
-        ))
-    });
+    let router = setup_state();
+    let first = router
+        .clone()
+        .oneshot(create_request(Uuid::now_v7(), None))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::NO_CONTENT);
 
     let response = router
         .oneshot(create_request(Uuid::now_v7(), None))
@@ -237,8 +213,26 @@ async fn given_a_taken_name_when_created_then_it_should_conflict_on_the_name() {
 }
 
 #[tokio::test]
+async fn given_a_non_realm_admin_when_created_then_it_should_be_forbidden() {
+    let router = setup_state_with(
+        AuthorizedScope::User,
+        InMemoryOrganizationWriteRepository::default(),
+    );
+
+    let response = router
+        .oneshot(create_request(Uuid::now_v7(), None))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: StatusCodeError = from_slice(&body_bytes).unwrap();
+    assert_eq!(json.error_key, "error.authorization.not-realm-admin");
+}
+
+#[tokio::test]
 async fn given_malformed_json_when_created_then_it_should_be_a_json_error() {
-    let router = setup_state(Uuid::now_v7());
+    let router = setup_state();
 
     let response = router
         .oneshot(
@@ -261,11 +255,10 @@ async fn given_malformed_json_when_created_then_it_should_be_a_json_error() {
 
 #[tokio::test]
 async fn given_a_repository_failure_when_created_then_it_should_return_a_server_error() {
-    let router = setup_state_returning(|| {
-        Err(CreateOrganizationError::Database(
-            RepositoryWriteError::Failure("connection refused: 10.0.0.5:5432".to_string()),
-        ))
-    });
+    let router = setup_state_with(
+        AuthorizedScope::SuperAdmin,
+        InMemoryOrganizationWriteRepository::failing("connection refused: 10.0.0.5:5432"),
+    );
 
     let response = router
         .oneshot(create_request(Uuid::now_v7(), None))

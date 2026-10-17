@@ -1,5 +1,5 @@
 use auth_core::domain::{
-    exception::RepositoryWriteError,
+    error::RepositoryWriteError,
     organization::{
         Organization, events::CreatedOrganization, repository::OrganizationWriteRepository,
     },
@@ -154,7 +154,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use auth_core::domain::{
-        exception::RepositoryWriteError,
+        error::RepositoryWriteError,
         organization::{
             Organization, events::CreatedOrganization, repository::OrganizationWriteRepository,
         },

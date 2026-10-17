@@ -6,11 +6,8 @@ use std::{
 };
 
 use auth_core::{
-    application::{
-        authorization::AuthorizedRequest,
-        organization::{commands::CreateOrganization, create::CreateOrganizationError},
-    },
-    domain::organization::{INVALID_ORGANIZATION_ID_ERROR, OrganizationId},
+    application::organization::{commands::CreateOrganization, create::CreateOrganizationUseCase},
+    domain::{error::WRONG_UUID_ERROR, organization::INVALID_ORGANIZATION_ID_ERROR},
 };
 use axum::{
     extract::{FromRef, State},
@@ -24,7 +21,7 @@ use kern::{
 };
 use serde::Deserialize;
 use utoipa::ToSchema;
-use uuid::Uuid;
+use uuid::{Uuid, Version};
 
 use crate::{
     AppState,
@@ -32,15 +29,9 @@ use crate::{
     error::ApiError,
 };
 
-pub type CreateOrganizationApplicationService = dyn UseCase<
-        Request = AuthorizedRequest<CreateOrganization>,
-        Response = Result<OrganizationId, CreateOrganizationError>,
-    > + Send
-    + Sync;
-
 #[derive(Clone)]
 pub struct CreateOrganizationState {
-    pub use_case: Arc<CreateOrganizationApplicationService>,
+    pub use_case: Arc<CreateOrganizationUseCase>,
 }
 
 impl FromRef<AppState> for CreateOrganizationState {
@@ -95,6 +86,10 @@ impl TryFrom<CreateOrganizationRequest> for CreateOrganization {
             return Err(DomainError::single(INVALID_ORGANIZATION_ID_ERROR));
         };
 
+        if id.get_version() != Some(Version::SortRand) {
+            return Err(DomainError::single(WRONG_UUID_ERROR));
+        }
+
         Ok(CreateOrganization::new(
             id,
             value.name,
@@ -116,7 +111,7 @@ mod tests {
 
     use auth_core::{
         application::organization::commands::CreateOrganization,
-        domain::organization::INVALID_ORGANIZATION_ID_ERROR,
+        domain::{error::WRONG_UUID_ERROR, organization::INVALID_ORGANIZATION_ID_ERROR},
     };
     use uuid::Uuid;
 
@@ -147,6 +142,16 @@ mod tests {
             error
                 .error_details()
                 .any(|detail| *detail == INVALID_ORGANIZATION_ID_ERROR)
+        );
+    }
+
+    #[test]
+    fn given_a_non_v7_uuid_when_converted_then_it_should_be_rejected() {
+        let error = CreateOrganization::try_from(request(Uuid::new_v4().to_string())).unwrap_err();
+        assert!(
+            error
+                .error_details()
+                .any(|detail| *detail == WRONG_UUID_ERROR)
         );
     }
 

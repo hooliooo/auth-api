@@ -13,7 +13,7 @@ use crate::{
         organization::commands::CreateOrganization,
     },
     domain::{
-        exception::RepositoryWriteError,
+        error::RepositoryWriteError,
         organization::{Organization, OrganizationId, repository::OrganizationWriteRepository},
     },
 };
@@ -91,71 +91,175 @@ pub enum CreateOrganizationError {
 mod tests {
     use kern::application::ids::AuthorizedParty;
     use kern::application::use_case::UseCase;
-    use mockall::Sequence;
     use std::{collections::HashMap, sync::Arc};
     use uuid::Uuid;
 
     use crate::{
         application::{
-            MockTestEventPublisher,
             authorization::{
-                AuthorizedRequest, AuthzContext, MockAuthorizationService,
+                AuthAPIAuthorizationService, AuthorizedRequest, AuthzContext,
                 authorized_scope::AuthorizedScope,
             },
-            organization::{commands::CreateOrganization, create::CreateOrganizationUseCase},
+            organization::{
+                commands::CreateOrganization,
+                create::{CreateOrganizationError, CreateOrganizationUseCase},
+            },
         },
-        domain::organization::repository::MockOrganizationWriteRepository,
+        domain::{error::RepositoryWriteError, organization::OrganizationId},
+        test_support::{InMemoryOrganizationWriteRepository, RecordingEventPublisher},
     };
 
-    #[tokio::test]
-    async fn given_a_command_when_processed_then_is_should_succeed() {
-        let mut sequence = Sequence::new();
-        let mut authorization_service = MockAuthorizationService::new();
-        authorization_service
-            .expect_require_realm_admin()
-            .times(1)
-            .in_sequence(&mut sequence)
-            .returning(|_| Ok(()));
+    struct Fixture {
+        use_case: CreateOrganizationUseCase,
+        repository: Arc<InMemoryOrganizationWriteRepository>,
+        publisher: Arc<RecordingEventPublisher>,
+    }
 
-        let mut repository = MockOrganizationWriteRepository::new();
-        repository
-            .expect_create()
-            .times(1)
-            .in_sequence(&mut sequence)
-            .returning(|_, _| Result::Ok(()));
-
-        let mut event_emitter = MockTestEventPublisher::new();
-        event_emitter
-            .expect_publish()
-            .times(1)
-            .in_sequence(&mut sequence)
-            .returning(|_, _| ());
-
+    fn fixture(repository: InMemoryOrganizationWriteRepository) -> Fixture {
+        let repository = Arc::new(repository);
+        let publisher = Arc::new(RecordingEventPublisher::default());
         let use_case = CreateOrganizationUseCase::new(
-            Arc::new(authorization_service),
-            Arc::new(repository),
-            Arc::new(event_emitter),
+            Arc::new(AuthAPIAuthorizationService),
+            repository.clone(),
+            publisher.clone(),
         );
+        Fixture {
+            use_case,
+            repository,
+            publisher,
+        }
+    }
 
-        let authorized_scope = AuthorizedScope::SuperAdmin;
-        let request: AuthorizedRequest<CreateOrganization> = AuthorizedRequest::new(
+    fn request(scope: AuthorizedScope, name: &str) -> AuthorizedRequest<CreateOrganization> {
+        AuthorizedRequest::new(
             AuthzContext::new(
                 Uuid::now_v7(),
                 Uuid::now_v7(),
                 AuthorizedParty::new("test.client".to_string()),
-                authorized_scope,
+                scope,
             ),
             CreateOrganization::new(
                 Uuid::now_v7(),
-                "organization-a".to_string(),
+                name.to_string(),
                 "Organization A".to_string(),
                 "Some description".to_string(),
                 true,
                 HashMap::default(),
             ),
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn given_a_realm_admin_when_created_then_it_should_store_and_publish_the_organization() {
+        let Fixture {
+            use_case,
+            repository,
+            publisher,
+        } = fixture(InMemoryOrganizationWriteRepository::default());
+        let request = request(AuthorizedScope::SuperAdmin, "organization-a");
         let aggregate_id = *request.payload().aggregate_id();
+
         let created_id = use_case.handle(request).await.unwrap();
+
         assert_eq!(aggregate_id, created_id);
+        assert!(repository.contains(&created_id));
+        let published = publisher.published();
+        assert_eq!(published.len(), 1);
+        assert_eq!(
+            published[0]
+                .1
+                .aggregate_id()
+                .downcast_ref::<OrganizationId>(),
+            Some(&created_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn given_a_non_realm_admin_when_created_then_it_should_be_forbidden() {
+        let Fixture {
+            use_case,
+            repository,
+            publisher,
+        } = fixture(InMemoryOrganizationWriteRepository::default());
+
+        let error = use_case
+            .handle(request(
+                AuthorizedScope::OrganizationAdmin,
+                "organization-a",
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CreateOrganizationError::Forbidden(_)));
+        assert!(repository.is_empty());
+        assert!(publisher.published().is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_an_invalid_name_when_created_then_it_should_break_an_invariant() {
+        let Fixture {
+            use_case,
+            repository,
+            publisher,
+        } = fixture(InMemoryOrganizationWriteRepository::default());
+
+        let error = use_case
+            .handle(request(AuthorizedScope::SuperAdmin, "a"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CreateOrganizationError::Invariant(_)));
+        assert!(repository.is_empty());
+        assert!(publisher.published().is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_a_taken_name_when_created_then_it_should_publish_only_the_first() {
+        let Fixture {
+            use_case,
+            repository,
+            publisher,
+        } = fixture(InMemoryOrganizationWriteRepository::default());
+        use_case
+            .handle(request(AuthorizedScope::SuperAdmin, "organization-a"))
+            .await
+            .unwrap();
+
+        let error = use_case
+            .handle(request(AuthorizedScope::SuperAdmin, "organization-a"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CreateOrganizationError::Database(RepositoryWriteError::AlreadyExists {
+                field: "name",
+                ..
+            })
+        ));
+        assert_eq!(repository.len(), 1);
+        assert_eq!(publisher.published().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn given_a_repository_failure_when_created_then_it_should_not_publish() {
+        let Fixture {
+            use_case,
+            publisher,
+            ..
+        } = fixture(InMemoryOrganizationWriteRepository::failing(
+            "connection refused",
+        ));
+
+        let error = use_case
+            .handle(request(AuthorizedScope::SuperAdmin, "organization-a"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CreateOrganizationError::Database(RepositoryWriteError::Failure(_))
+        ));
+        assert!(publisher.published().is_empty());
     }
 }

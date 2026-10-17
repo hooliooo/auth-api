@@ -1,7 +1,7 @@
 //! Translations for the errors any resource can hit: the core's building blocks and axum's
 //! request rejections.
 
-use auth_core::domain::exception::RepositoryWriteError;
+use auth_core::domain::error::RepositoryWriteError;
 use axum::{
     extract::rejection::{JsonRejection, PathRejection},
     http::StatusCode,
@@ -71,7 +71,7 @@ impl IntoApiError for PathRejection {
 
 #[cfg(test)]
 mod tests {
-    use auth_core::domain::exception::RepositoryWriteError;
+    use auth_core::domain::error::RepositoryWriteError;
     use axum::http::StatusCode;
 
     use crate::error::test_support::render;

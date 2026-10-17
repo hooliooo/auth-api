@@ -1,39 +1,55 @@
 # BFF
 
-A backend-for-frontend for a single-page app: it signs users in with Keycloak (authorization
-code flow with PKCE), keeps their tokens server-side in Redis, and gives the browser only an
-opaque `HttpOnly` session cookie. The SPA calls `/api/*` on the BFF, which forwards to the API
-with the user's access token.
+A backend-for-frontend for a single-page app: it signs users in with an OpenID Connect provider
+such as Keycloak (authorization code flow with PKCE), keeps their tokens server-side in Redis,
+and gives the browser only an opaque `HttpOnly` session cookie. The SPA calls `/api/*` on the
+BFF, which forwards to the API with the user's access token.
 
 ## Routes
 
 | Route | Called by | Does |
 |---|---|---|
-| `GET /auth/login?returnUrl=/path` | browser navigation | starts a sign-in, redirects to Keycloak |
-| `GET /auth/callback` | Keycloak redirect | finishes the sign-in, sets the session cookie; on failure redirects to `/?login_error=1` |
+| `GET /auth/login?returnUrl=/path` | browser navigation | starts a sign-in, redirects to the provider |
+| `GET /auth/callback` | provider redirect | finishes the sign-in, sets the session cookie; on failure redirects to `/?login_error=1` |
 | `GET /auth/session` | SPA | who is signed in, or 401 |
-| `POST /auth/logout` | SPA (`x-bff-csrf: 1`) | ends the session here and, server to server, at Keycloak; returns `logoutUrl`: the app's start page, or Keycloak's logout page (no token in it) if Keycloak could not be reached |
-| `POST /auth/backchannel-logout` | Keycloak | ends every session of one Keycloak sign-in |
+| `POST /auth/logout` | SPA (`x-bff-csrf: 1`) | ends the session here and at the provider (see [Identity providers](#identity-providers)); returns `logoutUrl`, where the SPA goes next: the app's start page, or the provider's logout page (no token in it) |
+| `POST /auth/backchannel-logout` | provider | ends every session of one provider sign-in |
 | `ANY /api/*` | SPA (`x-bff-csrf: 1` for writes) | forwards to `API_BASE_URL` with a fresh bearer token; paths with `.` or `..` segments are refused (400) |
-| `GET /.well-known/jwks.json` | Keycloak | the BFF's public client keys, with `private_key_jwt` (404 otherwise) |
+| `GET /.well-known/jwks.json` | provider | the BFF's public client keys, with `private_key_jwt` (404 otherwise) |
 | `GET /health`, `GET /health/ready` | orchestrator | process up; Redis reachable |
 
 Every response carries an `x-request-id`, also logged and forwarded to the API.
 
-A session lasts exactly as long as the user's Keycloak session: each sign-in and token refresh
-sets its expiry from Keycloak's `refresh_expires_in`, so the realm's SSO idle and maximum
-lifetimes apply without being configured twice. Reading the session does not extend it; a
-token refresh, like in Keycloak, does. The BFF additionally ends every session 24 hours after
-sign-in.
+With Keycloak, a session lasts exactly as long as the user's Keycloak session: each sign-in and
+token refresh sets its expiry from Keycloak's `refresh_expires_in`, so the realm's SSO idle and
+maximum lifetimes apply without being configured twice. Other providers do not report their
+session's lifetime, so there a session lasts an hour past its last sign-in or refresh. Reading
+the session does not extend it; a token refresh does. The BFF additionally ends every session
+24 hours after sign-in.
+
+## Identity providers
+
+The BFF uses only standard OpenID Connect (discovery, authorization code with PKCE, token
+refresh, back-channel logout) except where `IDENTITY_PROVIDER` says otherwise:
+
+| | `oidc`: any provider | `keycloak` |
+|---|---|---|
+| ID token type | not checked: standard ID tokens carry none; the audience, `azp` and nonce checks keep other tokens out | `typ` must be `ID`, as Keycloak signs every token type with the same keys |
+| Session lifetime | an hour past the last sign-in or refresh | Keycloak's `refresh_expires_in` |
+| Logout | revokes the refresh token (RFC 7009), then `logoutUrl` is the provider's logout page, where its session ends; the start page if the provider publishes none | ends the Keycloak session server to server with the refresh token; `logoutUrl` is the start page, or Keycloak's logout page if Keycloak could not be reached |
+
+A provider need not publish a revocation or logout endpoint; the step that needs one is then
+skipped and logged.
 
 ## Configuration
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `ISSUER_URI` | yes | | Keycloak realm as tokens name it, e.g. `https://id.example.com/realms/main` |
-| `DISCOVERY_URI` | no | `ISSUER_URI` | where the BFF reaches Keycloak itself, e.g. an in-cluster address; token, key and revocation calls go there too |
-| `CLIENT_ID` | yes | | the BFF's confidential Keycloak client |
-| `CLIENT_AUTH` | no | `client_secret` | how the BFF authenticates to Keycloak: `client_secret` or `private_key_jwt` (signed assertions; preferred) |
+| `ISSUER_URI` | yes | | the provider's issuer as tokens name it, e.g. a Keycloak realm `https://id.example.com/realms/main` |
+| `IDENTITY_PROVIDER` | yes | | `oidc` for any OpenID Connect provider, or `keycloak`; see [Identity providers](#identity-providers). No default, so a Keycloak deployment never silently loses Keycloak's checks |
+| `DISCOVERY_URI` | no | `ISSUER_URI` | where the BFF reaches the provider itself, e.g. an in-cluster address; token, key and revocation calls go there too |
+| `CLIENT_ID` | yes | | the BFF's confidential client at the provider |
+| `CLIENT_AUTH` | no | `client_secret` | how the BFF authenticates to the provider: `client_secret` or `private_key_jwt` (signed assertions; preferred) |
 | `CLIENT_SECRET` | with `client_secret` | | the client secret |
 | `CLIENT_KEY_FILE` | with `private_key_jwt` | | the EC P-256 private key (PEM) assertions are signed with |
 | `CLIENT_KEY_ID` | no | the key's JWK thumbprint | the key's `kid` |
@@ -44,7 +60,7 @@ sign-in.
 | `OIDC_SCOPES` | no | `openid` | scopes every sign-in requests, space-separated; must include `openid`, never `offline_access`. The browser cannot change them |
 | `LISTEN_ADDR` | no | `0.0.0.0:5100` | address and port to listen on |
 | `METRICS_ADDR` | no | `0.0.0.0:9100` | where Prometheus metrics are served (`GET /metrics`), apart from the public port (needs the `metrics` feature) |
-| `ALLOW_INSECURE_HTTP` | no | `false` | `true` accepts `http://` Keycloak URLs and redirect URI; local development only |
+| `ALLOW_INSECURE_HTTP` | no | `false` | `true` accepts `http://` provider URLs and redirect URI; local development only |
 | `CLIENT_IP_HEADER` | no | | header a reverse proxy puts the client's IP in, e.g. `x-real-ip` or `cf-connecting-ip`; see below |
 | `TRUSTED_PROXIES` | with `CLIENT_IP_HEADER` | | comma-separated addresses or ranges (`10.42.0.0/16`) allowed to set that header |
 | `LOGIN_RATE_LIMIT_PER_MINUTE` | no | `10` | sign-in starts per client IP and minute; `0` turns it off (needs the `rate-limit` feature) |

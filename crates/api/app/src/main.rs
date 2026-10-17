@@ -26,9 +26,22 @@ async fn main() {
         Ok(other) => panic!("ALLOW_INSECURE_HTTP must be true or false, not '{other}'"),
     };
 
-    rest_api::run(listener, &oauth2_url, &database_url, &audience, transport)
-        .await
-        .expect("Failed to bind address")
+    // Whose access tokens are accepted: `oidc` (any OpenID Connect provider) or `keycloak`.
+    // Required: a Keycloak deployment must never fall back to the standard checks unnoticed.
+    let setting = env::var("IDENTITY_PROVIDER").expect("IDENTITY_PROVIDER must be set");
+    let provider = rest_api::IdentityProvider::from_setting(&setting)
+        .unwrap_or_else(|| panic!("IDENTITY_PROVIDER must be oidc or keycloak, not '{setting}'"));
+
+    rest_api::run(
+        listener,
+        &oauth2_url,
+        &database_url,
+        &audience,
+        transport,
+        provider,
+    )
+    .await
+    .expect("Failed to bind address")
 }
 
 fn env_string(key: &str, default: String) -> String {

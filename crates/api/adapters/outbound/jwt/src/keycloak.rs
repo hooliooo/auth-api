@@ -1,17 +1,11 @@
-//! What is specific to Keycloak: which claims name the client and user, and the shape of its
-//! roles claim.
-//!
-//! Verification is plain OIDC and lives in [`crate::oidc`]. Supporting another provider means
-//! another file like this one — a claims reader and an alias — not another verifier.
+//! What is specific to Keycloak: it marks token types in `typ`, and puts realm roles under
+//! `realm_access`.
 
-use std::collections::HashSet;
-
-use auth_core::application::{
-    authentication::Claims, authorization::authorized_scope::AuthorizedScope,
-};
-use kern::application::role::Role;
+use auth_core::application::authentication::Claims;
 use oidc::{OidcJwtVerifier, ProviderClaims, oidc::JwtVerificationError};
 use serde_json::Value;
+
+use crate::{claims_with_roles, roles_from};
 
 /// Where Keycloak publishes the realm roles of the token's subject.
 const REALM_ROLES_POINTER: &str = "/realm_access/roles";
@@ -19,10 +13,6 @@ const REALM_ROLES_POINTER: &str = "/realm_access/roles";
 /// Keycloak's `typ` for access tokens. ID, refresh and logout tokens are signed by the same
 /// realm keys and can carry the same audience, so the type is what keeps them out.
 const ACCESS_TOKEN_TYPE: &str = "Bearer";
-
-/// The Keycloak realm roles that grant unrestricted access.
-const REALM_ADMIN_ROLE: &str = "realm-admin";
-const MULTI_TENANCY_ADMIN_ROLE: &str = "multi-tenancy-admin";
 
 pub type KeycloakJwtVerifier = OidcJwtVerifier<Keycloak>;
 
@@ -39,43 +29,8 @@ impl ProviderClaims for Keycloak {
                 "not an access token (typ {token_type:?})"
             )));
         }
-
-        // `azp` names the client in every token; `client_id` only appears in the tokens of
-        // service accounts, so it is the fallback, not the source
-        let client_id = ["azp", "client_id"]
-            .into_iter()
-            .find_map(|claim| payload.get(claim).and_then(Value::as_str))
-            .ok_or(JwtVerificationError::MissingClaim("azp or client_id"))?;
-
-        let user_id = payload
-            .get("sub")
-            .and_then(Value::as_str)
-            .ok_or(JwtVerificationError::MissingClaim("sub"))?;
-
-        let realm_roles: HashSet<Role> = payload
-            .pointer(REALM_ROLES_POINTER)
-            .and_then(|roles| roles.as_array())
-            .map(|roles| {
-                roles
-                    .iter()
-                    .filter_map(|value| value.as_str())
-                    .map(|str| Role::new(str.to_owned()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let is_super_admin = realm_roles.contains(REALM_ADMIN_ROLE)
-            || realm_roles.contains(MULTI_TENANCY_ADMIN_ROLE);
-        let authorized_scope = if is_super_admin {
-            AuthorizedScope::SuperAdmin
-        } else {
-            AuthorizedScope::User
-        };
-
-        Ok(Claims {
-            user_id: user_id.to_owned(),
-            client_id: client_id.to_owned(),
-            authorized_scope,
-        })
+        let realm_roles = roles_from(payload.pointer(REALM_ROLES_POINTER));
+        claims_with_roles(&payload, &realm_roles)
     }
 }
 

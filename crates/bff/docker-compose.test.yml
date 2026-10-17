@@ -31,6 +31,30 @@ services:
     depends_on:
       echo-api:
         condition: service_started
+  # A BFF treating Keycloak as any OpenID Connect provider (`IDENTITY_PROVIDER=oidc`), so tests
+  # can check what the BFF does without Keycloak's extensions. Shares Redis and Keycloak.
+  bff-oidc:
+    extends:
+      file: docker-compose.yml
+      service: bff
+    container_name: bff-oidc
+    ports: !override
+      - "5103:5100"
+    environment:
+      IDENTITY_PROVIDER: oidc
+      REDIRECT_URI: http://localhost:5103/auth/callback
+      # As `bff`: each simulated browser has its own address, so its own sign-in limit.
+      CLIENT_IP_HEADER: cf-connecting-ip
+      TRUSTED_PROXIES: 0.0.0.0/0,::/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      keycloak-api:
+        condition: service_healthy
+  # Lets the BFF above sign users in too.
+  keycloak-config:
+    environment:
+      bff_extra_base_urls: http://localhost:5103
   # A second BFF that trusts no proxy: from any address its client IP header is ignored, so
   # tests can check a forged header changes nothing. Shares Redis and Keycloak with `bff`.
   bff-untrusted:

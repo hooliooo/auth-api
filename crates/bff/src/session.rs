@@ -18,16 +18,16 @@ use crate::{
     state::AppState,
 };
 
-/// How long a session lasts when the identity provider does not say (no
-/// `refresh_expires_in`). Otherwise a session ends exactly when the provider's would.
+/// How long a session lasts when the identity provider does not say how long its own session
+/// lasts. Otherwise a session ends exactly when the provider's would.
 const DEFAULT_LIFETIME_SECS: u64 = 3_600;
 /// The BFF's own cap: a session ends this long after sign-in, whatever the provider allows.
 pub const SSO_MAX_SECS: u64 = 24 * 3_600;
 
-/// How long to keep a session after a token response whose refresh token lives
-/// `refresh_expires_in` seconds: that long, as the provider's session ends with it.
-pub fn lifetime_secs(refresh_expires_in: Option<u64>) -> u64 {
-    match refresh_expires_in {
+/// How long to keep a session after a token response, given how many seconds the provider's
+/// session still lasts (`provider_secs`, if it says): that long, as the session ends with it.
+pub fn lifetime_secs(provider_secs: Option<u64>) -> u64 {
+    match provider_secs {
         Some(secs) if secs > 0 => secs,
         // Absent, or 0 for tokens that never expire on their own (e.g. offline tokens).
         _ => DEFAULT_LIFETIME_SECS,
@@ -294,7 +294,7 @@ struct RefreshResponse {
     id_token: Option<String>,
     /// Seconds until the new access token expires.
     expires_in: u64,
-    /// Seconds until the refresh token, and with it the provider's session, expires.
+    /// Seconds until the refresh token, and with it the provider's session, expires (Keycloak).
     refresh_expires_in: Option<u64>,
 }
 
@@ -375,7 +375,13 @@ async fn refresh_locked(
         .key(session_key(&hash_key(sid)))
         .arg(&lock.token)
         .arg(seal(sid, &session)?)
-        .arg(lifetime_secs(response.refresh_expires_in))
+        .arg(lifetime_secs(
+            app_state
+                .oidc
+                .config
+                .provider
+                .session_lifetime_secs(response.refresh_expires_in),
+        ))
         .invoke_async(redis)
         .await?;
     if written == 0 {

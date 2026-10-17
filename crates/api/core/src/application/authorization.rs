@@ -13,7 +13,6 @@ use crate::application::authorization::authorized_scope::AuthorizedScope;
 
 pub mod authorized_scope;
 
-#[cfg_attr(test, mockall::automock)]
 pub trait AuthorizationService: Send + Sync {
     fn require_realm_admin(&self, request: &AuthzContext) -> Result<(), ForbiddenError>;
 }

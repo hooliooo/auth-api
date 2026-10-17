@@ -39,6 +39,7 @@ use crate::{
     crypto::{constant_time_eq, hash_key},
     error::AppError,
     pkce::{CodeVerifier, PkceError, S256},
+    provider::{IdentityProvider, Logout},
     random::{RandomUnvailable, random_token},
     session::{self, SSO_MAX_SECS, Session, now},
     state::AppState,
@@ -52,8 +53,6 @@ const LOGOUT_TOKEN_MAX_AGE_SECS: u64 = 120;
 const LOGOUT_JTI_TTL_SECS: u64 = LOGOUT_TOKEN_MAX_AGE_SECS + 2 * oidc::oidc::LEEWAY_SECS;
 /// Where the browser lands when a sign-in cannot be completed; the SPA shows the message.
 const LOGIN_FAILED_PATH: &str = "/?login_error=1";
-/// Keycloak's `typ` for ID tokens.
-const ID_TOKEN_TYPE: &str = "ID";
 
 /// The `/auth/*` routes.
 pub fn routes() -> Router<AppState> {
@@ -170,7 +169,7 @@ struct TokenResponse {
     id_token: String,
     /// Renews `access_token`; absent if the client may not refresh.
     refresh_token: Option<String>,
-    /// Seconds until `refresh_token`, and with it the provider's session, expires.
+    /// Seconds until `refresh_token`, and with it the provider's session, expires (Keycloak).
     refresh_expires_in: Option<u64>,
 }
 
@@ -181,7 +180,7 @@ struct IdTokenClaims {
     sub: String,
     /// Must match the sign-in's nonce.
     nonce: Option<String>,
-    /// Keycloak's token type; must be `ID`.
+    /// The token type, if the provider marks it (Keycloak: `ID`).
     typ: Option<String>,
     /// The client the token was issued to, if named.
     azp: Option<String>,
@@ -361,7 +360,7 @@ async fn complete_sign_in(
         .await
         .map_err(LoginError::JwtVerificationError)?;
     let id_token_claims = serde_json::from_value::<IdTokenClaims>(json)?;
-    check_id_token(&id_token_claims, s.client_id())?;
+    check_id_token(&id_token_claims, s.client_id(), s.oidc.config.provider)?;
     match id_token_claims.nonce.as_deref() {
         Some(nonce) if constant_time_eq(nonce, &pending_login.nonce) => {}
         _ => return Err(LoginError::InvalidNonce.into()),
@@ -387,7 +386,12 @@ async fn complete_sign_in(
             expires_at: issued_at + token_response.expires_in,
             created_at: issued_at,
         },
-        session::lifetime_secs(token_response.refresh_expires_in),
+        session::lifetime_secs(
+            s.oidc
+                .config
+                .provider
+                .session_lifetime_secs(token_response.refresh_expires_in),
+        ),
     )
     .await?;
 
@@ -443,14 +447,15 @@ async fn exchange_code(
 #[serde(rename_all = "camelCase")]
 struct LogoutResponse {
     /// Where the SPA navigates next: its start page, or the provider's logout page if the
-    /// provider could not be told.
+    /// provider's session is not over yet.
     logout_url: String,
 }
 
-/// Ends `current_session` here and at the identity provider, server to server, so no token
-/// passes through the browser. `logoutUrl` is then the app's start page; if the provider could
-/// not be reached, it is the provider's own logout page instead, without a token, where the
-/// user confirms. `app_state` has Redis and the provider.
+/// Ends `current_session` here and at the identity provider, without passing a token through
+/// the browser. With Keycloak the provider session ends server to server and `logoutUrl` is the
+/// app's start page, unless Keycloak could not be reached. Otherwise the refresh token is
+/// revoked and `logoutUrl` is the provider's logout page, without a token, where the user
+/// confirms. `app_state` has Redis and the provider.
 async fn logout(
     State(app_state): State<AppState>,
     current_session: CurrentSession,
@@ -463,27 +468,30 @@ async fn logout(
     )
     .await?;
 
-    let ended_at_provider = match current_session.session.refresh_token.as_deref() {
-        Some(refresh_token) => end_provider_session(&app_state, refresh_token).await,
-        None => false,
-    };
-    let provider = if ended_at_provider {
-        "ended"
-    } else {
-        "unreachable"
-    };
-    metrics::counter("bff_logouts_total", &[("provider", provider)]);
-    let logout_url = if ended_at_provider {
-        app_state.oidc.public_base_url.clone()
-    } else {
-        let mut url = app_state.oidc.end_session_url.clone();
-        url.query_pairs_mut()
-            .append_pair("client_id", app_state.client_id())
-            .append_pair(
-                "post_logout_redirect_uri",
-                app_state.oidc.public_base_url.as_str(),
-            );
-        url
+    let refresh_token = current_session.session.refresh_token.as_deref();
+    let logout_url = match app_state.oidc.config.provider.logout() {
+        Logout::RefreshTokenAtEndSession => {
+            let ended = match refresh_token {
+                Some(refresh_token) => end_provider_session(&app_state, refresh_token).await,
+                None => false,
+            };
+            let outcome = if ended { "ended" } else { "unreachable" };
+            metrics::counter("bff_logouts_total", &[("provider", outcome)]);
+            if ended {
+                app_state.oidc.public_base_url.clone()
+            } else {
+                browser_logout_url(&app_state)
+            }
+        }
+        Logout::RevokeThenBrowser => {
+            let revoked = match refresh_token {
+                Some(refresh_token) => revoke_refresh_token(&app_state, refresh_token).await,
+                None => false,
+            };
+            let outcome = if revoked { "revoked" } else { "not_revoked" };
+            metrics::counter("bff_logouts_total", &[("provider", outcome)]);
+            browser_logout_url(&app_state)
+        }
     };
 
     let mut response = Json(LogoutResponse {
@@ -496,12 +504,54 @@ async fn logout(
     Ok(no_store(response))
 }
 
+/// The provider's logout page for the browser, without a token, coming back to the app's start
+/// page; the start page itself if the provider has no such page. `app_state` has the provider.
+fn browser_logout_url(app_state: &AppState) -> Url {
+    let Some(mut url) = app_state.oidc.end_session_url.clone() else {
+        return app_state.oidc.public_base_url.clone();
+    };
+    url.query_pairs_mut()
+        .append_pair("client_id", app_state.client_id())
+        .append_pair(
+            "post_logout_redirect_uri",
+            app_state.oidc.public_base_url.as_str(),
+        );
+    url
+}
+
 /// Ends the provider session `refresh_token` belongs to, at `app_state`'s provider, server to
 /// server (Keycloak's logout with a refresh token). This also invalidates the refresh token and
 /// tells the session's other clients through back-channel logout. `false` if it failed; that is
 /// only logged, since the BFF's session is already gone.
 async fn end_provider_session(app_state: &AppState, refresh_token: &str) -> bool {
-    let mut form = vec![("refresh_token", refresh_token.to_owned())];
+    let form = vec![("refresh_token", refresh_token.to_owned())];
+    let endpoint = app_state.oidc.internal_end_session_endpoint();
+    post_logout_call(app_state, endpoint, form).await
+}
+
+/// Revokes `refresh_token` at `app_state`'s provider (RFC 7009), so it cannot renew tokens
+/// after logout. `false` if the provider has no revocation endpoint or the call failed; that
+/// is only logged, since the BFF's session is already gone.
+async fn revoke_refresh_token(app_state: &AppState, refresh_token: &str) -> bool {
+    let form = vec![
+        ("token", refresh_token.to_owned()),
+        ("token_type_hint", "refresh_token".to_owned()),
+    ];
+    let endpoint = app_state.oidc.revocation_endpoint();
+    post_logout_call(app_state, endpoint, form).await
+}
+
+/// Posts `form`, with the BFF's client authentication, to the provider's `endpoint` during a
+/// logout; `true` if the provider accepted it. `app_state` has the provider.
+async fn post_logout_call(
+    app_state: &AppState,
+    endpoint: Option<&str>,
+    mut form: Vec<(&'static str, String)>,
+) -> bool {
+    let Some(endpoint) = endpoint else {
+        warn!("the identity provider publishes no endpoint for this logout step");
+        return false;
+    };
     match app_state.client_auth_fields() {
         Ok(fields) => form.extend(fields),
         Err(error) => {
@@ -509,12 +559,7 @@ async fn end_provider_session(app_state: &AppState, refresh_token: &str) -> bool
             return false;
         }
     }
-    let result = app_state
-        .http
-        .post(app_state.oidc.internal_end_session_endpoint())
-        .form(&form)
-        .send()
-        .await;
+    let result = app_state.http.post(endpoint).form(&form).send().await;
     match result {
         Ok(response) if response.status().is_success() => true,
         Ok(response) => {
@@ -608,10 +653,14 @@ async fn current(current: CurrentSession) -> Response {
 }
 
 /// The ID token checks OIDC Core §3.1.3.7 adds to signature, issuer, audience and expiry:
-/// `claims` must be an ID token's, and if they name an authorized party, it must be
-/// `client_id`.
-fn check_id_token(claims: &IdTokenClaims, client_id: &str) -> Result<(), LoginError> {
-    if claims.typ.as_deref() != Some(ID_TOKEN_TYPE) {
+/// `claims` must be an ID token's as far as `provider` marks token types, and if they name an
+/// authorized party, it must be `client_id`.
+fn check_id_token(
+    claims: &IdTokenClaims,
+    client_id: &str,
+    provider: IdentityProvider,
+) -> Result<(), LoginError> {
+    if !provider.is_id_token(claims.typ.as_deref()) {
         return Err(LoginError::InvalidIdToken("not an ID token"));
     }
     let several_audiences = claims
@@ -632,6 +681,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::auth::{IdTokenClaims, check_id_token};
+    use crate::provider::IdentityProvider::{Keycloak, StandardOidc};
 
     /// Valid ID token claims for client `bff`, changed by `extra`; a `null` removes a claim.
     fn id_token(extra: Value) -> IdTokenClaims {
@@ -648,27 +698,36 @@ mod tests {
 
     #[test]
     fn given_an_id_token_for_this_client_then_it_is_accepted() {
-        assert!(check_id_token(&id_token(json!({})), "bff").is_ok());
-        assert!(check_id_token(&id_token(json!({ "azp": null })), "bff").is_ok());
+        assert!(check_id_token(&id_token(json!({})), "bff", Keycloak).is_ok());
+        assert!(check_id_token(&id_token(json!({ "azp": null })), "bff", Keycloak).is_ok());
     }
 
     #[test]
     fn given_another_token_type_then_it_is_refused() {
         for typ in [json!("Bearer"), json!("Logout"), Value::Null] {
-            assert!(check_id_token(&id_token(json!({ "typ": typ })), "bff").is_err());
+            assert!(check_id_token(&id_token(json!({ "typ": typ })), "bff", Keycloak).is_err());
         }
     }
 
     #[test]
+    fn given_a_standard_provider_then_an_untyped_id_token_is_accepted() {
+        let untyped = id_token(json!({ "typ": null }));
+        assert!(check_id_token(&untyped, "bff", StandardOidc).is_ok());
+    }
+
+    #[test]
     fn given_another_authorized_party_then_it_is_refused() {
-        assert!(check_id_token(&id_token(json!({ "azp": "other" })), "bff").is_err());
+        for provider in [Keycloak, StandardOidc] {
+            let other = id_token(json!({ "azp": "other" }));
+            assert!(check_id_token(&other, "bff", provider).is_err());
+        }
     }
 
     #[test]
     fn given_several_audiences_then_azp_is_required() {
         let several = json!({ "aud": ["bff", "account"], "azp": null });
-        assert!(check_id_token(&id_token(several), "bff").is_err());
+        assert!(check_id_token(&id_token(several), "bff", Keycloak).is_err());
         let with_azp = json!({ "aud": ["bff", "account"] });
-        assert!(check_id_token(&id_token(with_azp), "bff").is_ok());
+        assert!(check_id_token(&id_token(with_azp), "bff", Keycloak).is_ok());
     }
 }

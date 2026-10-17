@@ -1,5 +1,9 @@
+use kern::building_blocks::error::error_detail::ErrorDetail;
 use thiserror::Error;
 use uuid::Uuid;
+
+pub const WRONG_UUID_ERROR: ErrorDetail =
+    ErrorDetail::new_const("error.aggregate.invalid-id", "UUID is not version 7");
 
 #[derive(Debug, Error)]
 pub enum RepositoryWriteError {

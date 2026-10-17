@@ -39,6 +39,14 @@ pub fn bff(path: &str) -> Url {
     bff_base().join(path).expect("Paths should join the Url")
 }
 
+/// The base URL of the BFF that treats Keycloak as any OpenID Connect provider
+/// (`E2E_OIDC_BFF_URL`, default `http://localhost:5103`).
+pub fn oidc_bff_base() -> Url {
+    let base_url =
+        std::env::var("E2E_OIDC_BFF_URL").unwrap_or_else(|_| "http://localhost:5103".into());
+    Url::parse(&base_url).expect("E2E_OIDC_BFF_URL should be a Url")
+}
+
 /// A browser stand-in: one cookie jar for every site, no automatic redirects.
 pub struct Browser {
     /// Client without redirects or cookie handling of its own.
@@ -201,7 +209,12 @@ pub fn query_param(url: &Url, name: &str) -> Option<String> {
 
 /// The BFF's sign-in URL returning to `return_url`.
 pub fn login_url(return_url: &str) -> String {
-    let mut url = bff("/auth/login");
+    login_url_at(&bff_base(), return_url)
+}
+
+/// The sign-in URL of the BFF at `base`, returning to `return_url`.
+fn login_url_at(base: &Url, return_url: &str) -> String {
+    let mut url = base.join("/auth/login").expect("Paths should join the Url");
     url.query_pairs_mut().append_pair("returnUrl", return_url);
     url.to_string()
 }
@@ -209,8 +222,13 @@ pub fn login_url(return_url: &str) -> String {
 /// Signs `browser` in at Keycloak, returning to `return_url`, and stops before the BFF's
 /// callback; returns the callback URL.
 pub async fn sign_in_until_callback(browser: &mut Browser, return_url: &str) -> Url {
+    sign_in_until_callback_at(browser, &bff_base(), return_url).await
+}
+
+/// [`sign_in_until_callback`] for the BFF at `base`.
+async fn sign_in_until_callback_at(browser: &mut Browser, base: &Url, return_url: &str) -> Url {
     let _one_at_a_time = SIGN_IN.lock().await;
-    let login = browser.get(&login_url(return_url)).await;
+    let login = browser.get(&login_url_at(base, return_url)).await;
     assert_eq!(
         login.status(),
         StatusCode::SEE_OTHER,
@@ -258,7 +276,12 @@ pub async fn sign_in_until_callback(browser: &mut Browser, return_url: &str) -> 
 
 /// A complete sign-in of `browser`, returning to `return_url`; returns the callback's response.
 pub async fn sign_in(browser: &mut Browser, return_url: &str) -> Response {
-    let callback = sign_in_until_callback(browser, return_url).await;
+    sign_in_at(browser, &bff_base(), return_url).await
+}
+
+/// [`sign_in`] at the BFF at `base`.
+pub async fn sign_in_at(browser: &mut Browser, base: &Url, return_url: &str) -> Response {
+    let callback = sign_in_until_callback_at(browser, base, return_url).await;
     browser.get(callback.as_str()).await
 }
 
@@ -279,19 +302,24 @@ fn login_form_action(html: &str) -> String {
 
 /// Waits up to a minute for the BFF to report ready.
 pub async fn wait_for_bff() {
+    wait_for_bff_at(&bff_base()).await;
+}
+
+/// Waits up to a minute for the BFF at `base` to report ready.
+pub async fn wait_for_bff_at(base: &Url) {
     let http = Client::new();
+    let ready = base
+        .join("/health/ready")
+        .expect("Paths should join the Url");
     for _ in 0..60 {
-        if let Ok(response) = http.get(bff("/health/ready")).send().await
+        if let Ok(response) = http.get(ready.clone()).send().await
             && response.status() == StatusCode::OK
         {
             return;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    panic!(
-        "BFF at {} did not become ready; is the compose stack up?",
-        bff_base()
-    );
+    panic!("BFF at {base} did not become ready; is the compose stack up?");
 }
 
 /// A connection to the test stack's Redis (`E2E_REDIS_URL`).

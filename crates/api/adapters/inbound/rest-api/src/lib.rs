@@ -18,3 +18,6 @@ pub use server::run;
 
 /// Whether the identity provider may be reached over plain HTTP; see [`oidc::Transport`].
 pub use oidc::Transport;
+
+/// Whose access tokens the API accepts; see [`jwt::IdentityProvider`].
+pub use jwt::IdentityProvider;

@@ -24,6 +24,7 @@ pub async fn get_server_address() -> SocketAddr {
                     &database_url,
                     &audience,
                     rest_api::Transport::AllowInsecureHttp,
+                    rest_api::IdentityProvider::Keycloak,
                 )
                 .await
                 .unwrap();

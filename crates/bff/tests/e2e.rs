@@ -13,10 +13,11 @@ use crate::support::{
     Browser, JWT_BEARER, USERNAME, arm_keycloak_fault, bff, bff_client_key_id, client_assertion,
     dev_client_key, end_keycloak_session, eventually, hash_key, index_members,
     keycloak_refresh_status, keycloak_session_idle_secs, keycloak_user_session_ids, location,
-    login_cookie_name, login_url, metric, metrics_page, now, open_sealed, query_param,
-    raw_get_status, read_session, recorded_logout_tokens, redis, set_backchannel_logout_url,
-    set_cookie, set_realm_role, sign_in, sign_in_until_callback, token_request, untrusted_bff,
-    unverified_payload, wait_for_bff, write_session,
+    login_cookie_name, login_url, metric, metrics_page, now, oidc_bff_base, open_sealed,
+    query_param, raw_get_status, read_session, recorded_logout_tokens, redis,
+    set_backchannel_logout_url, set_cookie, set_realm_role, sign_in, sign_in_at,
+    sign_in_until_callback, token_request, untrusted_bff, unverified_payload, wait_for_bff,
+    wait_for_bff_at, write_session,
 };
 
 /// Asserts `response` forbids caching; `what` names it in the failure.
@@ -384,6 +385,58 @@ async fn given_a_session_when_logging_out_then_it_ends_here_and_at_keycloak_with
         "ending the Keycloak session invalidated the refresh token"
     );
     let session_response = browser.get(bff("/auth/session").as_str()).await;
+    assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn given_a_standard_provider_when_logging_out_then_the_refresh_token_is_revoked_and_the_browser_signs_out_there()
+ {
+    let base = oidc_bff_base();
+    wait_for_bff_at(&base).await;
+    let mut browser = Browser::new();
+    sign_in_at(&mut browser, &base, "/").await;
+    let sid = browser
+        .cookie("__Host-bff")
+        .expect("signed in without checking the ID token's type")
+        .to_owned();
+    let ttl = session_ttl(&sid).await;
+    assert!(
+        (3_570..=3_600).contains(&ttl),
+        "the provider reports no session lifetime, so the session lasts an hour: ttl {ttl}"
+    );
+    let session = read_session(&sid).await.unwrap();
+    let refresh_token = session["refresh_token"].as_str().unwrap().to_owned();
+
+    let logout = base.join("/auth/logout").unwrap();
+    let response = browser.post(logout.as_str(), &[("x-bff-csrf", "1")]).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_no_store(&response, "logout");
+    let body: Value = response.json().await.unwrap();
+    let logout_url = reqwest::Url::parse(body["logoutUrl"].as_str().unwrap()).unwrap();
+    assert!(
+        logout_url
+            .path()
+            .ends_with("/protocol/openid-connect/logout"),
+        "the browser finishes at the provider's logout page: {logout_url}"
+    );
+    assert_eq!(
+        query_param(&logout_url, "post_logout_redirect_uri").as_deref(),
+        Some(base.as_str())
+    );
+    assert!(
+        query_param(&logout_url, "id_token_hint").is_none(),
+        "no token for the browser to carry"
+    );
+    assert!(raw_session(&sid).await.is_none(), "session key is deleted");
+    assert_eq!(
+        keycloak_refresh_status(&refresh_token).await,
+        StatusCode::BAD_REQUEST,
+        "the refresh token was revoked"
+    );
+    let session_response = browser
+        .get(base.join("/auth/session").unwrap().as_str())
+        .await;
     assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
 }
 

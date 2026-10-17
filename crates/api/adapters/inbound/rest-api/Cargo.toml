@@ -31,6 +31,6 @@ uuid.workspace               = true
 write-model                  = { path = "../../outbound/write-model" }
 
 [dev-dependencies]
-mockall.workspace = true
+auth-core         = { path = "../../../core", features = ["test-support"] }
 reqwest.workspace = true
 tokio.workspace   = true
