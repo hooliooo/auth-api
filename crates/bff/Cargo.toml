@@ -1,0 +1,35 @@
+[package]
+name    = "bff"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["e2e", "metrics", "rate-limit"]
+e2e = []
+# Per-client limit on sign-in starts, kept in Redis. Leave it out when something in front,
+# such as Cloudflare, already limits /auth/login.
+rate-limit = []
+# Prometheus metrics on a separate address (METRICS_ADDR); no extra dependencies.
+metrics = []
+
+[dependencies]
+async-trait.workspace        = true
+axum                         = { workspace = true }
+base64.workspace             = true
+jsonwebtoken.workspace       = true
+oidc                         = { path = "../oidc" }
+redis                        = { workspace = true, features = ["tokio-comp", "connection-manager"] }
+reqwest                      = { workspace = true, features = ["stream"] }
+ring                         = { workspace = true }
+serde.workspace              = true
+serde_json.workspace         = true
+subtle                       = { workspace = true }
+thiserror.workspace          = true
+time.workspace               = true
+tokio.workspace              = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+regex.workspace = true
