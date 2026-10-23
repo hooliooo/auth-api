@@ -9,6 +9,8 @@ use tokio::{sync::Mutex, time::Instant};
 
 use crate::jwks::{JwksSource, JwksSourceError, Keys, SigningKey};
 
+/// The provider's signing keys, cached: refreshed once older than their TTL or when a token
+/// names a key id not in the cache, at most once per cooldown, and kept when a refresh fails.
 pub struct Cache {
     /// The JWKS to fetch
     source: Box<dyn JwksSource>,
@@ -54,6 +56,9 @@ impl Cache {
             .clone()
     }
 
+    /// The signing key with id `kid`: from the cache while it is fresh, otherwise after a
+    /// refresh. Fails if the provider does not publish it even after a refresh, or could not be
+    /// asked about it.
     pub async fn key(&self, kid: &str) -> Result<Arc<SigningKey>, JwksSourceError> {
         let keys = self.snapshot();
         if keys.fetched_at.elapsed() < self.ttl

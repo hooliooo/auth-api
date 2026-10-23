@@ -11,7 +11,6 @@ e2e = []
 [dependencies]
 async-trait.workspace  = true
 jsonwebtoken.workspace = true
-kern.workspace         = true
 reqwest.workspace      = true
 serde.workspace        = true
 serde_json.workspace   = true
@@ -20,6 +19,9 @@ tokio                  = { workspace = true, features = ["sync", "time"] }
 tracing.workspace      = true
 
 [dev-dependencies]
+# Generates RSA test keys at run time (ring cannot); already in the build as jsonwebtoken's
+# crypto backend.
+aws-lc-rs        = "1.18"
 base64.workspace = true
 ring.workspace   = true
-tokio            = { workspace = true, features = ["test-util", "macros", "rt"] }
+tokio            = { workspace = true, features = ["test-util", "macros", "rt", "net", "io-util"] }

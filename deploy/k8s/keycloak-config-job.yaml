@@ -1,0 +1,65 @@
+# The realm setup (iam-config/keycloak-config/setup-scripts), run once after Keycloak is ready.
+# The scripts are not idempotent, so dev/k8s/up.sh applies this only when it has not completed.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-config
+  namespace: auth-api
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-keycloak
+          image: auth-api/keycloak-config:dev
+          imagePullPolicy: Never
+          command:
+            - bash
+            - -c
+            - until curl -sf http://keycloak:9000/health/ready >/dev/null; do echo waiting for Keycloak; sleep 3; done
+      containers:
+        - name: setup
+          image: auth-api/keycloak-config:dev
+          imagePullPolicy: Never
+          # The scripts write their logs next to themselves, so they run from a writable copy.
+          command:
+            - bash
+            - -c
+            - cp -r /scripts/. /work/ && bash /work/setup_configuration.sh
+          env:
+            # The admin API from inside the cluster, not through the ingress.
+            - name: keycloak_url
+              value: http://keycloak:8080
+            - name: KEYCLOAK_ADMIN
+              valueFrom:
+                secretKeyRef: { name: keycloak-admin, key: username }
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: keycloak-admin, key: password }
+            - { name: realm, value: test }
+            - { name: smtp_host, value: smtp-server }
+            - { name: smtp_port, value: "1025" }
+            - { name: IAM_email, value: IAM@company.com }
+            - { name: IAM_email_display_name, value: IAM Company }
+            - { name: api_client_id, value: authentication.layer.api }
+            - name: api_client_secret
+              valueFrom:
+                secretKeyRef: { name: keycloak-clients, key: api-client-secret }
+            - { name: end_to_end_client_id, value: end.to.end.client }
+            - name: end_to_end_client_secret
+              valueFrom:
+                secretKeyRef: { name: keycloak-clients, key: end-to-end-client-secret }
+            # The BFF is not deployed yet; its client is set up for where it will run.
+            - { name: bff_client_id, value: bff }
+            - { name: bff_base_url, value: "https://auth-api" }
+            - { name: bff_internal_url, value: "http://bff:5100" }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: work, mountPath: /work }
+      volumes:
+        - name: scripts
+          configMap:
+            name: keycloak-config-scripts
+        - name: work
+          emptyDir: {}

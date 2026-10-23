@@ -1,0 +1,11 @@
+# Keycloak and what it needs, in namespace auth-api: PostgreSQL, the mail catcher for its
+# emails, and its ingress. Secrets and the realm scripts' ConfigMap are created by
+# dev/k8s/up.sh, never committed; the realm setup Job runs once after Keycloak is ready.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: auth-api
+resources:
+  - namespace.yaml
+  - keycloak-postgres.yaml
+  - keycloak.yaml
+  - smtp.yaml

@@ -1,0 +1,101 @@
+# Keycloak, from iam-config/keycloak (optimized build for PostgreSQL), behind the ingress at
+# https://keycloak-api. Browsers and in-cluster callers use that one address: the hosts file
+# sends browsers to the ingress, and CoreDNS sends pods there too, so the issuer is the same
+# everywhere.
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  labels: { app: keycloak }
+spec:
+  selector: { app: keycloak }
+  ports:
+    - name: http
+      port: 8080
+    - name: management
+      port: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: keycloak }
+  template:
+    metadata:
+      labels: { app: keycloak }
+    spec:
+      containers:
+        - name: keycloak
+          image: auth-api/keycloak:dev
+          imagePullPolicy: Never
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef: { name: keycloak-admin, key: username }
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: keycloak-admin, key: password }
+            - name: KC_DB_URL
+              value: jdbc:postgresql://keycloak-postgres:5432/keycloak
+            - name: KC_DB_USERNAME
+              value: keycloak_admin
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: keycloak-db, key: password }
+            # The public address; TLS ends at the ingress, which forwards X-Forwarded-*.
+            - name: KC_HOSTNAME
+              value: https://keycloak-api
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            # Plain HTTP only between the ingress and Keycloak, inside the cluster.
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HTTP_METRICS_HISTOGRAMS_ENABLED
+              value: "true"
+            # Tracing is built in; with no collector in this cluster, sample nothing.
+            - name: KC_TRACING_SAMPLER_RATIO
+              value: "0.0"
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9000
+          startupProbe:
+            httpGet: { path: /health/started, port: management }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /health/ready, port: management }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health/live, port: management }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 250m, memory: 768Mi }
+            limits: { memory: 1536Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  annotations:
+    # cert-manager issues keycloak-api-tls from the local CA (deploy/platform/cluster-issuer.yaml).
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [keycloak-api]
+      secretName: keycloak-api-tls
+  rules:
+    - host: keycloak-api
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port: { name: http }
