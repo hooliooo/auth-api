@@ -1,0 +1,93 @@
+# The BFF, from crates/bff, behind the ingress at https://auth-api. It reaches Keycloak at its
+# public address, https://keycloak-api, like browsers do (CoreDNS sends it to the ingress), and
+# trusts the local CA for that from the local-ca ConfigMap. Its client key is the one
+# crates/bff/dev/generate-client-key.sh made on this machine; dev/k8s/up.sh copies it into the
+# bff-client-key secret.
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff
+  labels: { app: bff }
+spec:
+  selector: { app: bff }
+  ports:
+    - name: http
+      port: 5100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bff }
+  template:
+    metadata:
+      labels: { app: bff }
+    spec:
+      containers:
+        - name: bff
+          image: auth-api/bff:dev
+          imagePullPolicy: Never
+          env:
+            - { name: RUST_LOG, value: "bff=debug,oidc=debug,info" }
+            - { name: ISSUER_URI, value: https://keycloak-api/realms/test }
+            - { name: CLIENT_ID, value: bff }
+            - { name: IDENTITY_PROVIDER, value: keycloak }
+            - { name: CLIENT_CREDENTIALS, value: private_key_jwt }
+            - { name: CLIENT_KEY_FILE, value: /run/secrets/bff/client-key.pem }
+            - { name: REDIRECT_URI, value: https://auth-api/auth/callback }
+            - { name: REDIS_URI, value: redis://redis:6379 }
+            # The ingress sets X-Real-Ip to the client's address; only its pods (the pod
+            # network) are believed.
+            - { name: CLIENT_IP_HEADER, value: x-real-ip }
+            - { name: TRUSTED_PROXIES, value: 10.244.0.0/16 }
+            # API_BASE_URL is not set until the API runs in the cluster: /api/* answers 503.
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 5100
+            - name: metrics
+              containerPort: 9100
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: client-key, mountPath: /run/secrets/bff, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: client-key
+          secret:
+            secretName: bff-client-key
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bff
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [auth-api]
+      secretName: auth-api-tls
+  rules:
+    - host: auth-api
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bff
+                port: { name: http }

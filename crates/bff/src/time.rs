@@ -1,3 +1,5 @@
+//! The clock, in the Unix seconds tokens use.
+
 /// The current time in Unix seconds.
 pub fn now() -> u64 {
     let now = time::UtcDateTime::now();

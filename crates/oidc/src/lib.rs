@@ -9,10 +9,11 @@
 #![warn(missing_docs)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+mod causes;
 mod jwks;
 pub mod logout;
 mod retry;
-mod verifier;
+pub mod verifier;
 pub mod well_known;
 
 pub use jwks::JwksSourceError;

@@ -1,0 +1,88 @@
+# The test helpers (crates/echo-api): the stand-in API behind the BFF, the recorder for
+# Keycloak's back-channel logouts, and a proxy in front of Keycloak that can be told to fail a
+# request once.
+#
+# The proxy answers as https://keycloak-api, with a certificate for that name from the local CA,
+# on a Service with a fixed address; the BFF under test resolves keycloak-api to that address
+# (bff-patch.yaml), so its Keycloak calls pass through the proxy while it still uses Keycloak's
+# one public address. The proxy itself reaches Keycloak through the ingress, like any pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-api
+  labels: { app: echo-api }
+spec:
+  selector: { app: echo-api }
+  ports:
+    - name: http
+      port: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-proxy
+  labels: { app: echo-api }
+spec:
+  selector: { app: echo-api }
+  # Fixed, for the BFF's hostAliases. From the low end of the service range, which Kubernetes
+  # keeps for fixed addresses and never hands out on its own.
+  clusterIP: 10.96.0.200
+  ports:
+    - name: https
+      port: 443
+      targetPort: proxy
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: keycloak-proxy-tls
+spec:
+  secretName: keycloak-proxy-tls
+  dnsNames: [keycloak-api]
+  issuerRef:
+    kind: ClusterIssuer
+    name: local-ca
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: echo-api }
+  template:
+    metadata:
+      labels: { app: echo-api }
+    spec:
+      containers:
+        - name: echo-api
+          image: auth-api/echo-api:dev
+          imagePullPolicy: Never
+          env:
+            - { name: KEYCLOAK_URL, value: https://keycloak-api }
+            - { name: BACKCHANNEL_TARGET, value: http://bff:5100/auth/backchannel-logout }
+            - { name: PROXY_TLS_CERT, value: /etc/proxy-tls/tls.crt }
+            - { name: PROXY_TLS_KEY, value: /etc/proxy-tls/tls.key }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: proxy
+              containerPort: 8081
+          readinessProbe:
+            tcpSocket: { port: proxy }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: proxy-tls, mountPath: /etc/proxy-tls, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: proxy-tls
+          secret:
+            secretName: keycloak-proxy-tls
+        - name: local-ca
+          configMap:
+            name: local-ca

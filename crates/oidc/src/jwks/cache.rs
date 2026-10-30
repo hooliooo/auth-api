@@ -71,7 +71,7 @@ impl Cache {
         let (keys, failure) = self.refresh(&keys).await;
         match (keys.by_kid.get(kid), failure) {
             (Some(key), _) => Ok(key.clone()),
-            (None, Some(error)) => Err(JwksSourceError::Unreachable(error.to_string())),
+            (None, Some(error)) => Err(error),
             (None, None) => Err(JwksSourceError::SigningKeyNotFound(kid.into())),
         }
     }

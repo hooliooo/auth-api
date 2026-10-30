@@ -5,7 +5,9 @@ edition = "2024"
 publish = false
 
 [features]
-default = ["e2e", "metrics", "rate-limit"]
+default = ["metrics", "rate-limit"]
+# The tests against the local cluster (tests/e2e.rs) only run with `--features e2e`, so a plain
+# `cargo test` needs no cluster.
 e2e = []
 # Per-client limit on sign-in starts, kept in Redis. Leave it out when something in front,
 # such as Cloudflare, already limits /auth/login.
@@ -34,4 +36,8 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 axum.workspace  = true
 regex.workspace = true
-tower = { workspace = true, features = ["util"] } 
+tower = { workspace = true, features = ["util"] }
+# The e2e tests' raw HTTPS request, which an HTTP client would normalise.
+rustls                   = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+rustls-platform-verifier = "0.7"
+tokio-rustls             = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }

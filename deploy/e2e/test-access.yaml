@@ -1,0 +1,38 @@
+# What the tests reach from this machine besides the ingress, on NodePorts that
+# deploy/kind/cluster.yaml maps to 127.0.0.1 only: Redis, to read and doctor sessions; the BFF's
+# metrics, which are never behind the ingress; and the test helpers' controls.
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-redis
+spec:
+  type: NodePort
+  selector: { app: redis }
+  ports:
+    - name: redis
+      port: 6379
+      nodePort: 30379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-bff-metrics
+spec:
+  type: NodePort
+  selector: { app: bff }
+  ports:
+    - name: metrics
+      port: 9100
+      nodePort: 30910
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-echo-api
+spec:
+  type: NodePort
+  selector: { app: echo-api }
+  ports:
+    - name: http
+      port: 8000
+      nodePort: 30999

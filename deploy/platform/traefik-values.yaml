@@ -21,3 +21,8 @@ ports:
           permanent: true
   websecure:
     nodePort: 30443
+    # readTimeout bounds reading a whole request, body included (default 60s), so it caps how
+    # long an upload through the BFF may take. Keep it in line with the production ingress.
+    transport:
+      respondingTimeouts:
+        readTimeout: 10m

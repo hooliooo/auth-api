@@ -1,3 +1,5 @@
+//! Hashing for Redis keys and constant-time comparison of secrets.
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::digest::{SHA256, digest};
 use subtle::ConstantTimeEq;

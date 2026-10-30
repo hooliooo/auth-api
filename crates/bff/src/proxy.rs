@@ -60,7 +60,7 @@ use axum::extract::ConnectInfo;
 
 use crate::{
     csrf::CSRF_HEADER,
-    error::AppError,
+    error::{AppError, with_causes},
     session::{CurrentSession, refresh_access_token},
     state::AppState,
 };
@@ -175,7 +175,7 @@ async fn api(
         .body(reqwest::Body::wrap_stream(body.into_data_stream()))
         .send()
         .await
-        .map_err(|e| AppError::ProxyRequestFailed(e.to_string()))?;
+        .map_err(|e| AppError::ProxyRequestFailed(with_causes(&e)))?;
     let mut response_headers = api_response.headers().clone();
     let mut response = Response::builder().status(api_response.status());
     strip_hop_by_hop(&mut response_headers);

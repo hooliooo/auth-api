@@ -1,0 +1,19 @@
+# The BFF under test: the echo API as its API, each simulated browser's address in a header the
+# ingress passes through untouched (as behind Cloudflare), and its calls to Keycloak through the
+# fault-injecting proxy, which answers at Keycloak's own address (echo-api.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff
+spec:
+  template:
+    spec:
+      hostAliases:
+        - ip: 10.96.0.200 # the keycloak-proxy Service
+          hostnames: [keycloak-api]
+      containers:
+        - name: bff
+          env:
+            - { name: API_BASE_URL, value: "http://echo-api:8000" }
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            - { name: LOGIN_RATE_LIMIT_PER_MINUTE, value: "10" }

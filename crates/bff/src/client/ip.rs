@@ -1,3 +1,6 @@
+//! The client's IP address: the connection's, or the one a trusted proxy names in a header
+//! (behind the ingress, `x-real-ip`).
+
 use std::{
     net::{IpAddr, SocketAddr},
     str::FromStr,

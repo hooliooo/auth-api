@@ -1,0 +1,173 @@
+# Two more BFFs the tests compare against, sharing Redis, Keycloak and the client key with the
+# BFF under test, each at its own address behind the ingress:
+#
+# - bff-oidc (https://auth-api-oidc): treats Keycloak as any OpenID Connect provider
+#   (IDENTITY_PROVIDER=oidc), to check what the BFF does without Keycloak's extensions.
+# - bff-untrusted (https://auth-api-untrusted): trusts no proxy, so its client address header is
+#   ignored whoever sets it.
+#
+# The tests reach both names without hosts-file entries: they resolve them to the ingress
+# themselves.
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff-oidc
+  labels: { app: bff-oidc }
+spec:
+  selector: { app: bff-oidc }
+  ports:
+    - name: http
+      port: 5100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff-oidc
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bff-oidc }
+  template:
+    metadata:
+      labels: { app: bff-oidc }
+    spec:
+      containers:
+        - name: bff
+          image: auth-api/bff:dev
+          imagePullPolicy: Never
+          env:
+            - { name: RUST_LOG, value: "bff=debug,oidc=debug,info" }
+            - { name: ISSUER_URI, value: https://keycloak-api/realms/test }
+            - { name: CLIENT_ID, value: bff }
+            - { name: IDENTITY_PROVIDER, value: oidc }
+            - { name: CLIENT_CREDENTIALS, value: private_key_jwt }
+            - { name: CLIENT_KEY_FILE, value: /run/secrets/bff/client-key.pem }
+            - { name: REDIRECT_URI, value: https://auth-api-oidc/auth/callback }
+            - { name: REDIS_URI, value: redis://redis:6379 }
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            - { name: TRUSTED_PROXIES, value: 10.244.0.0/16 }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 5100
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: client-key, mountPath: /run/secrets/bff, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: client-key
+          secret:
+            secretName: bff-client-key
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bff-oidc
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [auth-api-oidc]
+      secretName: auth-api-oidc-tls
+  rules:
+    - host: auth-api-oidc
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bff-oidc
+                port: { name: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff-untrusted
+  labels: { app: bff-untrusted }
+spec:
+  selector: { app: bff-untrusted }
+  ports:
+    - name: http
+      port: 5100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff-untrusted
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bff-untrusted }
+  template:
+    metadata:
+      labels: { app: bff-untrusted }
+    spec:
+      containers:
+        - name: bff
+          image: auth-api/bff:dev
+          imagePullPolicy: Never
+          env:
+            - { name: RUST_LOG, value: "bff=debug,oidc=debug,info" }
+            - { name: ISSUER_URI, value: https://keycloak-api/realms/test }
+            - { name: CLIENT_ID, value: bff }
+            - { name: IDENTITY_PROVIDER, value: keycloak }
+            - { name: CLIENT_CREDENTIALS, value: private_key_jwt }
+            - { name: CLIENT_KEY_FILE, value: /run/secrets/bff/client-key.pem }
+            - { name: REDIRECT_URI, value: https://auth-api-untrusted/auth/callback }
+            - { name: REDIS_URI, value: redis://redis:6379 }
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            # TEST-NET-3: no connection ever comes from here, so the header is never believed.
+            - { name: TRUSTED_PROXIES, value: 203.0.113.1/32 }
+            - { name: LOGIN_RATE_LIMIT_PER_MINUTE, value: "10" }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 5100
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: client-key, mountPath: /run/secrets/bff, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: client-key
+          secret:
+            secretName: bff-client-key
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bff-untrusted
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [auth-api-untrusted]
+      secretName: auth-api-untrusted-tls
+  rules:
+    - host: auth-api-untrusted
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bff-untrusted
+                port: { name: http }

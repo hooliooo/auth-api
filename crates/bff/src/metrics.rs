@@ -7,7 +7,8 @@
 //! - `bff_token_refreshes_total{outcome}`: `refreshed`, `rejected` (the session ended) or
 //!   `failed` (the identity provider was unavailable; the session stays).
 //! - `bff_logouts_total{provider}`: `ended` at the provider, or `unreachable`.
-//! - `bff_backchannel_logouts_total{outcome}`: `accepted`, `replayed` or `invalid`.
+//! - `bff_backchannel_logouts_total{outcome}`: `accepted`, `replayed`, `invalid` or
+//!   `provider_unavailable` (its keys could not be fetched to check the token).
 //! - `bff_rate_limited_total`: sign-in starts refused by the rate limit.
 
 #[cfg(feature = "metrics")]

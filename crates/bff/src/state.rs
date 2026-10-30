@@ -1,3 +1,5 @@
+//! What every request handler shares: HTTP clients, Redis, the identity provider and settings.
+
 use std::sync::Arc;
 
 use oidc::{OidcVerifier, ProviderClaims, VerificationError, well_known::Transport};
@@ -12,6 +14,7 @@ use crate::{
     identity_provider::IdentityProvider,
 };
 
+/// Shared by every request handler; cheap to clone.
 #[derive(Clone)]
 pub(crate) struct AppState {
     /// Client for identity provider calls, with a short total timeout.
@@ -30,6 +33,9 @@ pub(crate) struct AppState {
     /// Where a request's client address comes from: the connection, or a trusted proxy's header
     /// (behind the ingress, its `x-real-ip`).
     pub client_ip: ClientIpSource,
+    /// Sign-in starts allowed per client IP and minute; 0 turns the limit off.
+    #[cfg(feature = "rate-limit")]
+    pub login_per_minute: u32,
 }
 
 impl AppState {
@@ -52,11 +58,6 @@ impl AppState {
     /// The BFF's public sign-in callback URL.
     pub fn redirect_uri(&self) -> &str {
         &self.oidc.config.redirect_uri
-    }
-
-    /// Where the browser is sent to sign in.
-    pub fn authorization_endpoint(&self) -> &str {
-        self.oidc.authorization_url.as_str()
     }
 }
 

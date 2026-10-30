@@ -13,7 +13,7 @@ use crate::time::now;
 use crate::{
     cookie,
     crypto::hash_key,
-    error::AppError,
+    error::{AppError, with_causes},
     random::random_token,
     sealed::{self, Purpose},
     state::AppState,
@@ -329,7 +329,7 @@ async fn refresh_locked(
         .await
         .map_err(|e| {
             metrics::counter("bff_token_refreshes_total", &[("outcome", "failed")]);
-            AppError::RefreshAccessTokenFailed(e.to_string())
+            AppError::RefreshAccessTokenFailed(with_causes(&e))
         })?;
 
     match response.status() {
@@ -353,7 +353,7 @@ async fn refresh_locked(
     let response: RefreshResponse = response
         .json()
         .await
-        .map_err(|e| AppError::RefreshAccessTokenFailed(e.to_string()))?;
+        .map_err(|e| AppError::RefreshAccessTokenFailed(with_causes(&e)))?;
     session.access_token = response.access_token;
     if let Some(new_refresh_token) = response.refresh_token {
         session.refresh_token = Some(new_refresh_token);

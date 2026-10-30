@@ -50,7 +50,7 @@ spec:
             - name: end_to_end_client_secret
               valueFrom:
                 secretKeyRef: { name: keycloak-clients, key: end-to-end-client-secret }
-            # The BFF is not deployed yet; its client is set up for where it will run.
+            # Keycloak calls the BFF's service directly for its keys and back-channel logouts.
             - { name: bff_client_id, value: bff }
             - { name: bff_base_url, value: "https://auth-api" }
             - { name: bff_internal_url, value: "http://bff:5100" }

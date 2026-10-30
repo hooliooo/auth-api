@@ -1,5 +1,5 @@
 # The local cluster: one node, with the ingress controller's ports on this machine's 80 and 443,
-# bound to 127.0.0.1 only. The hosts file sends keycloak-api (and later auth-api) here.
+# bound to 127.0.0.1 only. The hosts file sends keycloak-api and auth-api here.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: auth-api
@@ -17,5 +17,19 @@ nodes:
         protocol: TCP
       - containerPort: 30080
         hostPort: 80
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # For the e2e tests only (deploy/e2e/test-access.yaml); nothing listens without --e2e.
+      # Redis, the BFF's metrics and the test helpers' controls.
+      - containerPort: 30379
+        hostPort: 16379
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      - containerPort: 30910
+        hostPort: 19100
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      - containerPort: 30999
+        hostPort: 19199
         listenAddress: "127.0.0.1"
         protocol: TCP

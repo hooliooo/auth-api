@@ -4,20 +4,23 @@ use reqwest::Client;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::causes::with_causes;
+
 /// The path OIDC Discovery 1.0 mandates for the document, relative to the issuer.
 const DISCOVERY_PATH: &str = ".well-known/openid-configuration";
 
-/// A failure reading the discovery document at startup.
+/// A failure reading the discovery document at startup. The message includes the request's
+/// causes, e.g. an untrusted certificate.
 #[derive(Debug, Error)]
 pub enum WellKnownEndpointError {
     /// The connection failed.
-    #[error("Could not reach the well-known endpoint: {0}")]
+    #[error("Could not reach the well-known endpoint: {}", with_causes(.0))]
     Unreachable(reqwest::Error),
     /// The endpoint answered with an error status.
-    #[error("The well-known endpoint returned an error: {0}")]
+    #[error("The well-known endpoint returned an error: {}", with_causes(.0))]
     ErrorStatus(reqwest::Error),
     /// The body is not a discovery document.
-    #[error("The well-known endpoint is not valid JSON: {0}")]
+    #[error("The well-known endpoint is not valid JSON: {}", with_causes(.0))]
     Malformed(reqwest::Error),
 }
 

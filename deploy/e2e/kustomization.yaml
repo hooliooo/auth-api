@@ -1,0 +1,13 @@
+# The cluster for the BFF's e2e tests (crates/bff/tests/e2e.rs): everything in deploy/k8s, plus
+# the test helpers and the BFF variants the tests compare against. dev/k8s/up.sh --e2e applies
+# this instead of deploy/k8s. Never part of a real deployment.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: auth-api
+resources:
+  - ../k8s
+  - echo-api.yaml
+  - bff-variants.yaml
+  - test-access.yaml
+patches:
+  - path: bff-patch.yaml

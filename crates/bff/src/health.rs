@@ -1,3 +1,5 @@
+//! Liveness (`/health`) and readiness (`/health/ready`, which needs Redis) checks.
+
 use axum::{Router, extract::State, http::StatusCode, routing::get};
 use tracing::warn;
 

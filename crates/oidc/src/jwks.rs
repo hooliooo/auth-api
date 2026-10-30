@@ -11,6 +11,8 @@ use jsonwebtoken::{
 use thiserror::Error;
 use tokio::time::Instant;
 
+use crate::causes::with_causes;
+
 pub mod cache;
 #[cfg(test)]
 mod fixtures;
@@ -63,12 +65,12 @@ impl JwksSource for HttpJwksSource {
             .get(&self.jwks_uri)
             .send()
             .await
-            .map_err(|err| JwksSourceError::Unreachable(err.to_string()))?
+            .map_err(|err| JwksSourceError::Unreachable(with_causes(&err)))?
             .error_for_status()
-            .map_err(|err| JwksSourceError::ErrorStatus(err.to_string()))?
+            .map_err(|err| JwksSourceError::ErrorStatus(with_causes(&err)))?
             .json()
             .await
-            .map_err(|err| JwksSourceError::Malformed(err.to_string()))
+            .map_err(|err| JwksSourceError::Malformed(with_causes(&err)))
     }
 }
 
