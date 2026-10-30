@@ -17,7 +17,7 @@ members  = [
 
 [workspace.dependencies]
 anyhow                 = { version = "1.0.104" }
-async-nats             = { version = "0.50.0" }
+async-nats             = { version = "0.51.0" }
 async-trait            = "0.1.92"
 axum                   = { version = "0.8.9", features = ["json", "tracing"] }
 axum-extra             = { version = "0.12.6", features = ["typed-header"] }
