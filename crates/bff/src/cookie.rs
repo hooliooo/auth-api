@@ -7,10 +7,14 @@ use axum::http::{
 
 use crate::crypto::hash_key;
 
+// `__Host-Http-` (RFC 6265bis): only this origin over HTTPS, never a subdomain (`__Host-`),
+// and only from a `Set-Cookie` header, never from page JavaScript (`Http-`), so an injected
+// script cannot plant a session id. Browsers that know only `__Host-` still enforce that part.
+
 /// Prefix of the per-sign-in login cookies; see [`login_cookie`].
-pub const LOGIN: &str = "__Host-bff-login";
+pub const LOGIN: &str = "__Host-Http-bff-login";
 /// Name of the session cookie; its value is the session id.
-pub const SESSION: &str = "__Host-bff";
+pub const SESSION: &str = "__Host-Http-bff";
 
 /// The login cookie of one sign-in, named after its `state`, so sign-ins started in two tabs
 /// do not overwrite each other's cookie.
@@ -56,6 +60,6 @@ mod tests {
     fn given_two_states_then_their_login_cookies_differ_and_are_stable() {
         assert_ne!(login_cookie("state-a"), login_cookie("state-b"));
         assert_eq!(login_cookie("state-a"), login_cookie("state-a"));
-        assert!(login_cookie("state-a").starts_with("__Host-bff-login-"));
+        assert!(login_cookie("state-a").starts_with("__Host-Http-bff-login-"));
     }
 }

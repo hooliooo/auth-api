@@ -34,8 +34,8 @@
 //! - **One origin for the SPA.** The SPA is served from the same origin as the BFF, so its
 //!   sign-in and API calls are same-origin: there is no CORS to configure, and the session
 //!   cookie can be `SameSite=Strict`.
-//! - **Cross-site requests are refused.** State-changing calls need the `x-bff-csrf` header,
-//!   which another site cannot add without a CORS preflight the BFF never grants
+//! - **Cross-site requests are refused.** Every call, reads included, needs the `x-bff-csrf`
+//!   header, which another origin cannot add without a CORS preflight the BFF never grants
 //!   (see [`crate::csrf`]).
 //!
 //! The proxy makes no authorization decisions: it only proves who the user is, through the

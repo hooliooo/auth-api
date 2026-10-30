@@ -19,12 +19,13 @@ use reqwest::{Method, StatusCode, header::CACHE_CONTROL};
 use serde_json::Value;
 
 use crate::support::{
-    Browser, CLIENT_IP_HEADER, JWT_BEARER, USERNAME, arm_keycloak_fault, bff, bff_client_key_id,
-    client_assertion, dev_client_key, end_keycloak_session, eventually, hash_key, http,
-    http_builder, index_members, keycloak_refresh_status, keycloak_session_idle_secs,
-    keycloak_user_session_ids, location, login_cookie_name, login_url, metric, metrics_page, now,
-    oidc_bff_base, open_sealed, query_param, raw_get_status, read_session, recorded_logout_tokens,
-    redis, set_backchannel_logout_url, set_cookie, set_realm_role, sign_in, sign_in_at,
+    Browser, CLIENT_IP_HEADER, CSRF_HEADER, JWT_BEARER, SESSION_COOKIE, USERNAME,
+    arm_keycloak_fault, bff, bff_client_key_id, client_assertion, dev_client_key,
+    end_keycloak_session, eventually, hash_key, http, http_builder, index_members,
+    keycloak_refresh_status, keycloak_session_idle_secs, keycloak_user_session_ids, location,
+    login_cookie_name, login_url, metric, metrics_page, now, oidc_bff_base, open_sealed,
+    query_param, raw_get_status, read_session, recorded_logout_tokens, redis,
+    set_backchannel_logout_url, set_cookie, set_realm_role, sign_in, sign_in_at,
     sign_in_until_callback, token_request, untrusted_bff, unverified_payload, wait_for_bff,
     wait_for_bff_at, write_session,
 };
@@ -168,7 +169,7 @@ async fn given_off_site_return_urls_when_logging_in_then_the_url_should_fall_bac
 async fn given_no_session_when_reading_session_then_it_should_be_unauthorized() {
     wait_for_bff().await;
     let mut browser = Browser::new();
-    let response = browser.get(bff("/auth/session").as_str()).await;
+    let response = browser.fetch(bff("/auth/session").as_str()).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -182,7 +183,7 @@ async fn given_valid_credentials_when_logging_in_then_it_should_succeed_with_a_s
     assert_eq!(location(&callback).path(), "/dashboard");
 
     assert_no_store(&callback, "the callback");
-    let session_cookie = set_cookie(&callback, "__Host-bff").expect("the cookie should exist");
+    let session_cookie = set_cookie(&callback, SESSION_COOKIE).expect("the cookie should exist");
     let lowered = session_cookie.to_ascii_lowercase();
     assert!(lowered.contains("samesite=strict"), "{session_cookie}");
     assert!(
@@ -190,15 +191,15 @@ async fn given_valid_credentials_when_logging_in_then_it_should_succeed_with_a_s
         "the cookie lives for the 24 h cap, not the 1 h idle timeout: {session_cookie}"
     );
     assert!(
-        !browser.has_cookie_starting_with("__Host-bff-login"),
+        !browser.has_cookie_starting_with("__Host-Http-bff-login"),
         "login cookie should be cleared"
     );
 
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let ttl = session_ttl(&sid).await;
     assert!((1..=3_600).contains(&ttl), "session ttl {ttl}");
 
-    let my_session = browser.get(bff("/auth/session").as_str()).await;
+    let my_session = browser.fetch(bff("/auth/session").as_str()).await;
     assert_eq!(my_session.status(), StatusCode::OK);
     assert_no_store(&my_session, "/auth/session");
     let body: Value = my_session.json().await.unwrap();
@@ -278,11 +279,11 @@ async fn given_an_existing_session_when_signing_in_again_then_the_old_session_is
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let first = browser.cookie("__Host-bff").unwrap().to_owned();
+    let first = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let first_keycloak_sid = keycloak_sid(&first).await;
 
     sign_in(&mut browser, "/").await;
-    let second = browser.cookie("__Host-bff").unwrap().to_owned();
+    let second = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
 
     assert_ne!(first, second, "a fresh session id is issued");
     assert_eq!(session_ttl(&first).await, -2, "old session key is deleted");
@@ -301,7 +302,7 @@ async fn given_a_session_when_stored_then_redis_holds_only_the_ciphertext_bound_
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
 
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let raw = raw_session(&sid)
         .await
         .expect("The session should be stored");
@@ -332,7 +333,7 @@ async fn given_a_logout_without_the_csrf_header_when_executing_then_it_should_be
     let response = browser.post(bff("/auth/logout").as_str(), &[]).await;
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let session_response = browser.get(bff("/auth/session").as_str()).await;
+    let session_response = browser.fetch(bff("/auth/session").as_str()).await;
     assert_eq!(
         session_response.status(),
         StatusCode::OK,
@@ -345,7 +346,7 @@ async fn given_a_session_when_logging_out_then_it_ends_here_and_at_keycloak_with
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let keycloak_sid = keycloak_sid(&sid).await;
     assert!(index_members(&keycloak_sid).await.contains(&hash_key(&sid)));
     let session = read_session(&sid).await.unwrap();
@@ -353,12 +354,12 @@ async fn given_a_session_when_logging_out_then_it_ends_here_and_at_keycloak_with
     let user_id = session["sub"].as_str().unwrap().to_owned();
 
     let response = browser
-        .post(bff("/auth/logout").as_str(), &[("x-bff-csrf", "1")])
+        .post(bff("/auth/logout").as_str(), &[(CSRF_HEADER, "1")])
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_no_store(&response, "logout");
-    let cleared = set_cookie(&response, "__Host-bff").expect("session cookie is cleared");
+    let cleared = set_cookie(&response, SESSION_COOKIE).expect("session cookie is cleared");
     assert!(
         cleared.to_ascii_lowercase().contains("max-age=0"),
         "{cleared}"
@@ -390,7 +391,7 @@ async fn given_a_session_when_logging_out_then_it_ends_here_and_at_keycloak_with
         StatusCode::BAD_REQUEST,
         "ending the Keycloak session invalidated the refresh token"
     );
-    let session_response = browser.get(bff("/auth/session").as_str()).await;
+    let session_response = browser.fetch(bff("/auth/session").as_str()).await;
     assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -402,7 +403,7 @@ async fn given_a_standard_provider_when_logging_out_then_the_refresh_token_is_re
     let mut browser = Browser::new();
     sign_in_at(&mut browser, &base, "/").await;
     let sid = browser
-        .cookie("__Host-bff")
+        .cookie(SESSION_COOKIE)
         .expect("signed in without checking the ID token's type")
         .to_owned();
     let ttl = session_ttl(&sid).await;
@@ -414,7 +415,7 @@ async fn given_a_standard_provider_when_logging_out_then_the_refresh_token_is_re
     let refresh_token = session["refresh_token"].as_str().unwrap().to_owned();
 
     let logout = base.join("/auth/logout").unwrap();
-    let response = browser.post(logout.as_str(), &[("x-bff-csrf", "1")]).await;
+    let response = browser.post(logout.as_str(), &[(CSRF_HEADER, "1")]).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_no_store(&response, "logout");
@@ -441,7 +442,7 @@ async fn given_a_standard_provider_when_logging_out_then_the_refresh_token_is_re
         "the refresh token was revoked"
     );
     let session_response = browser
-        .get(base.join("/auth/session").unwrap().as_str())
+        .fetch(base.join("/auth/session").unwrap().as_str())
         .await;
     assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
 }
@@ -466,7 +467,7 @@ async fn given_keycloak_ends_the_sign_in_when_it_notifies_the_bff_then_the_sessi
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let keycloak_sid = keycloak_sid(&sid).await;
     assert!(
         index_members(&keycloak_sid).await.contains(&hash_key(&sid)),
@@ -480,7 +481,7 @@ async fn given_keycloak_ends_the_sign_in_when_it_notifies_the_bff_then_the_sessi
     })
     .await;
     assert!(index_members(&keycloak_sid).await.is_empty());
-    let session_response = browser.get(bff("/auth/session").as_str()).await;
+    let session_response = browser.fetch(bff("/auth/session").as_str()).await;
     assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -489,7 +490,7 @@ async fn given_an_expired_access_token_when_calling_the_api_then_it_is_refreshed
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let mut session = read_session(&sid).await.unwrap();
     let old_access_token = session["access_token"].as_str().unwrap().to_owned();
     session["expires_at"] = 0.into();
@@ -519,7 +520,7 @@ async fn given_a_refresh_token_keycloak_rejects_when_calling_the_api_then_the_se
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let keycloak_sid = keycloak_sid(&sid).await;
     let mut session = read_session(&sid).await.unwrap();
     session["expires_at"] = 0.into();
@@ -540,7 +541,7 @@ async fn given_a_session_when_calling_the_api_then_only_the_bearer_is_forwarded(
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let access_token = read_session(&sid).await.unwrap()["access_token"]
         .as_str()
         .unwrap()
@@ -659,26 +660,29 @@ async fn given_too_many_sign_in_starts_from_one_client_then_it_is_limited_but_ot
 }
 
 #[tokio::test]
-async fn given_a_write_through_the_api_when_the_csrf_header_is_missing_then_it_is_forbidden() {
+async fn given_a_call_without_the_csrf_header_then_it_is_forbidden_even_a_read() {
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
 
-    let refused = browser
-        .request(
-            Method::POST,
-            bff("/api/echo/orders").as_str(),
-            &[],
-            Some("{}"),
-        )
-        .await;
-    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    // A page of another origin on the same site would send the Strict cookie, but could not add
+    // the header: reads are refused too (RFC 10017 §6.1.3.3.2), not only writes.
+    for (method, path, body) in [
+        (Method::POST, "/api/echo/orders", Some("{}")),
+        (Method::GET, "/api/echo/orders", None),
+        (Method::GET, "/auth/session", None),
+    ] {
+        let refused = browser
+            .request_without_csrf_header(method.clone(), bff(path).as_str(), &[], body)
+            .await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{method} {path}");
+    }
 
     let accepted = browser
         .request(
             Method::POST,
             bff("/api/echo/orders").as_str(),
-            &[("x-bff-csrf", "1"), ("content-type", "application/json")],
+            &[("content-type", "application/json")],
             Some(r#"{"item":42}"#),
         )
         .await;
@@ -687,7 +691,7 @@ async fn given_a_write_through_the_api_when_the_csrf_header_is_missing_then_it_i
     assert_eq!(echoed["method"], "POST");
     assert_eq!(echoed["body"], r#"{"item":42}"#);
     assert!(
-        echoed["headers"].get("x-bff-csrf").is_none(),
+        echoed["headers"].get(CSRF_HEADER).is_none(),
         "the CSRF header stays at the BFF"
     );
 }
@@ -725,12 +729,12 @@ async fn given_a_session_older_than_the_24_hour_cap_then_it_ends_even_when_activ
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let mut session = read_session(&sid).await.unwrap();
     session["created_at"] = (now() - 24 * 3_600 - 1).into();
     write_session(&sid, &session).await;
 
-    let response = browser.get(bff("/auth/session").as_str()).await;
+    let response = browser.fetch(bff("/auth/session").as_str()).await;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(
@@ -745,7 +749,7 @@ async fn given_a_sign_in_then_the_session_lasts_as_long_as_keycloaks() {
     let idle = keycloak_session_idle_secs().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
 
     let ttl = session_ttl(&sid).await;
     assert!(
@@ -759,14 +763,14 @@ async fn given_a_request_without_a_refresh_then_the_session_is_not_extended() {
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let mut redis = redis().await;
     let _: () = redis
         .expire(format!("bff:session:{}", hash_key(&sid)), 100)
         .await
         .unwrap();
 
-    let response = browser.get(bff("/auth/session").as_str()).await;
+    let response = browser.fetch(bff("/auth/session").as_str()).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let ttl = session_ttl(&sid).await;
@@ -782,7 +786,7 @@ async fn given_a_token_refresh_then_the_session_is_extended_with_keycloaks() {
     let idle = keycloak_session_idle_secs().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let mut session = read_session(&sid).await.unwrap();
     session["expires_at"] = 0.into();
     write_session(&sid, &session).await;
@@ -809,7 +813,10 @@ async fn given_dot_segments_in_an_api_path_then_they_are_refused() {
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let cookie = format!("__Host-bff={}", browser.cookie("__Host-bff").unwrap());
+    let cookie = format!(
+        "{SESSION_COOKIE}={}",
+        browser.cookie(SESSION_COOKIE).unwrap()
+    );
 
     // Either layer may refuse: the ingress resolves `..` and `%2e%2e` itself, so those arrive as
     // paths outside /api, which the BFF does not serve (404); what it passes on unchanged, the
@@ -835,7 +842,7 @@ async fn given_keycloak_fails_during_a_refresh_then_the_session_survives_and_rec
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let mut session = read_session(&sid).await.unwrap();
     let refresh_token = session["refresh_token"].as_str().unwrap().to_owned();
     session["expires_at"] = 0.into();
@@ -874,7 +881,7 @@ async fn given_a_logout_token_when_it_is_replayed_then_it_is_refused() {
     let captured = tokio::spawn(async {
         let mut browser = Browser::new();
         sign_in(&mut browser, "/").await;
-        let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+        let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
         let keycloak_sid = keycloak_sid(&sid).await;
         end_keycloak_session(&keycloak_sid).await;
         eventually("the first delivery ended the session", || async {
@@ -967,7 +974,7 @@ async fn given_keycloak_fails_during_logout_then_the_browser_gets_keycloaks_logo
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let refresh_token = read_session(&sid).await.unwrap()["refresh_token"]
         .as_str()
         .unwrap()
@@ -975,7 +982,7 @@ async fn given_keycloak_fails_during_logout_then_the_browser_gets_keycloaks_logo
     arm_keycloak_fault(&refresh_token, 503).await;
 
     let response = browser
-        .post(bff("/auth/logout").as_str(), &[("x-bff-csrf", "1")])
+        .post(bff("/auth/logout").as_str(), &[(CSRF_HEADER, "1")])
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
@@ -1006,7 +1013,7 @@ async fn given_single_use_refresh_tokens_then_each_refresh_keeps_the_rotated_tok
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let mut used = Vec::new();
 
     for _ in 0..2 {
@@ -1047,7 +1054,7 @@ async fn given_parallel_requests_with_an_expired_token_then_one_refresh_serves_t
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let mut session = read_session(&sid).await.unwrap();
     let before = session["refresh_token"].as_str().unwrap().to_owned();
     session["expires_at"] = 0.into();
@@ -1058,7 +1065,8 @@ async fn given_parallel_requests_with_an_expired_token_then_one_refresh_serves_t
     for _ in 0..5 {
         let request = http()
             .get(bff("/api/echo/whoami"))
-            .header("cookie", format!("__Host-bff={sid}"))
+            .header("cookie", format!("{SESSION_COOKIE}={sid}"))
+            .header(CSRF_HEADER, "1")
             .header(CLIENT_IP_HEADER, browser.client_ip.as_str());
         calls.spawn(async move { request.send().await.unwrap().status() });
     }
@@ -1110,7 +1118,7 @@ async fn given_a_signed_in_user_then_the_api_accepts_the_access_token_the_bff_fo
     wait_for_bff().await;
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
 
     let response = browser
         .request(Method::GET, bff("/api/echo/whoami").as_str(), &[], None)
@@ -1192,7 +1200,7 @@ async fn given_a_user_with_the_apis_admin_role_then_only_that_role_reaches_the_a
     let signed_in = tokio::spawn(async {
         let mut browser = Browser::new();
         sign_in(&mut browser, "/").await;
-        browser.cookie("__Host-bff").unwrap().to_owned()
+        browser.cookie(SESSION_COOKIE).unwrap().to_owned()
     })
     .await;
     set_realm_role(USERNAME, "multi-tenancy-admin", false).await;
@@ -1238,7 +1246,7 @@ async fn given_sign_ins_api_calls_and_refreshes_then_they_are_counted() {
 
     let mut browser = Browser::new();
     sign_in(&mut browser, "/").await;
-    let sid = browser.cookie("__Host-bff").unwrap().to_owned();
+    let sid = browser.cookie(SESSION_COOKIE).unwrap().to_owned();
     let mut session = read_session(&sid).await.unwrap();
     session["expires_at"] = 0.into();
     write_session(&sid, &session).await;

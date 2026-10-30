@@ -88,8 +88,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => axum::serve(TcpListener::bind(proxy_address).await?, keycloak_proxy).await,
         }
     };
-    tokio::try_join!(axum::serve(api_listener, api).into_future(), proxy)?;
+    let servers = async { tokio::try_join!(axum::serve(api_listener, api).into_future(), proxy) };
+    // Stops at once when asked to: as a container's first process, SIGTERM would otherwise be
+    // ignored, and an old instance would keep serving, with its own armed faults and recorded
+    // tokens, beside its replacement until it is killed.
+    tokio::select! {
+        result = servers => { result?; }
+        () = stop_requested() => {}
+    }
     Ok(())
+}
+
+/// Completes on SIGTERM (Kubernetes stopping the pod) or Ctrl-C.
+async fn stop_requested() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = terminate.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 async fn echo(method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {

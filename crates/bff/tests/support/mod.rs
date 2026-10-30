@@ -118,6 +118,10 @@ pub struct Browser {
 /// The header the test BFFs read client addresses from (`CLIENT_IP_HEADER`); the ingress
 /// passes it through untouched, as it would Cloudflare's.
 pub const CLIENT_IP_HEADER: &str = "cf-connecting-ip";
+/// The header the app sends on every call to `/api/*` and `/auth/*` (the BFF's CSRF defense).
+pub const CSRF_HEADER: &str = "x-bff-csrf";
+/// The BFF's session cookie.
+pub const SESSION_COOKIE: &str = "__Host-Http-bff";
 
 impl Browser {
     /// A browser with an empty jar and a random client address.
@@ -139,13 +143,20 @@ impl Browser {
         }
     }
 
-    /// `GET` to `url` with the jar's cookies.
+    /// A navigation to `url` (a link, a redirect, the address bar): `GET` with the jar's cookies
+    /// and nothing an app's script would add.
     pub async fn get(&mut self, url: &str) -> Response {
         let request = self.http.get(url);
         self.send(request).await
     }
 
-    /// A `fetch()`-style `POST` to `url` without body, with extra `headers`.
+    /// The app's `fetch()` of `url`: `GET` with the CSRF header, as the app sends on every call.
+    pub async fn fetch(&mut self, url: &str) -> Response {
+        self.request(Method::GET, url, &[], None).await
+    }
+
+    /// A `fetch()`-style `POST` to `url` without body, with exactly the extra `headers`; the CSRF
+    /// header only if they include it.
     pub async fn post(&mut self, url: &str, headers: &[(&str, &str)]) -> Response {
         let mut request = self.http.post(url);
         for (name, value) in headers {
@@ -154,9 +165,23 @@ impl Browser {
         self.send(request).await
     }
 
-    /// Any `method` on `url`, with extra `headers` and an optional `body`; for calls through the
-    /// proxy.
+    /// The app's call of any `method` on `url`, with the CSRF header, extra `headers` and an
+    /// optional `body`; for calls through the proxy.
     pub async fn request(
+        &mut self,
+        method: Method,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> Response {
+        let mut with_csrf = vec![(CSRF_HEADER, "1")];
+        with_csrf.extend_from_slice(headers);
+        self.request_without_csrf_header(method, url, &with_csrf, body)
+            .await
+    }
+
+    /// [`Self::request`] without the CSRF header: what a page of another origin could send.
+    pub async fn request_without_csrf_header(
         &mut self,
         method: Method,
         url: &str,
@@ -554,7 +579,7 @@ where
 
 /// Mirrors the BFF's `cookie::login_cookie`: the login cookie name for `state`.
 pub fn login_cookie_name(state: &str) -> String {
-    format!("__Host-bff-login-{}", &hash_key(state)[..16])
+    format!("__Host-Http-bff-login-{}", &hash_key(state)[..16])
 }
 
 /// The current time in Unix seconds.
@@ -811,7 +836,8 @@ pub async fn raw_get_status(path: &str, cookie: &str) -> u16 {
         .await
         .expect("TLS with the ingress");
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {BFF_HOST}\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {BFF_HOST}\r\nCookie: {cookie}\r\n{CSRF_HEADER}: 1\r\n\
+         Connection: close\r\n\r\n"
     );
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = Vec::new();

@@ -164,16 +164,29 @@ else
 fi
 
 step "BFF"
+# Restarts the deployments named, and returns once only their new pods are left: a rollout
+# counts as done when the new pods are ready, while the old ones may still be stopping and
+# reachable. The test helpers keep their state in memory, so nothing may reach an old one.
+restart() { # <deployment>...
+  local name pods old=()
+  for name in "$@"; do
+    read -r -a pods <<<"$(k -n auth-api get pods -l "app=$name" -o jsonpath='{.items[*].metadata.name}')"
+    old+=(${pods[@]+"${pods[@]}"}) # macOS's bash 3.2 refuses an empty "${pods[@]}" under set -u
+  done
+  for name in "$@"; do k -n auth-api rollout restart deployment "$name"; done
+  for name in "$@"; do k -n auth-api rollout status deployment "$name" --timeout=240s; done
+  if (( ${#old[@]} > 0 )); then
+    k -n auth-api wait --for=delete pod "${old[@]}" --timeout=120s >/dev/null
+  fi
+}
 # Started once the realm exists, and restarted for a rebuilt image or a new client key.
-bffs=(bff)
-if [[ "$overlay" == e2e ]]; then
-  bffs+=(bff-oidc bff-untrusted)
-  k -n auth-api rollout restart deployment echo-api
-  k -n auth-api rollout status deployment echo-api --timeout=120s
-fi
 k -n auth-api rollout status deployment redis --timeout=120s
-for name in "${bffs[@]}"; do k -n auth-api rollout restart deployment "$name"; done
-for name in "${bffs[@]}"; do k -n auth-api rollout status deployment "$name" --timeout=240s; done
+if [[ "$overlay" == e2e ]]; then
+  restart echo-api
+  restart bff bff-oidc bff-untrusted
+else
+  restart bff
+fi
 k -n auth-api wait certificate auth-api-tls --for=condition=Ready --timeout=120s
 
 cat <<DONE
