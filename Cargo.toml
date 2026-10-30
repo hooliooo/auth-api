@@ -10,7 +10,7 @@ members  = [
   # "crates/api/adapters/outbound/nats-event-publisher",
   # "crates/api/adapters/outbound/write-model",
 
-  # "crates/bff",
+  "crates/bff",
   # "crates/echo-api",
   "crates/oidc",
 ]
