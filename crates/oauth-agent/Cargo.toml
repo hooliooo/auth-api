@@ -1,0 +1,43 @@
+[package]
+name    = "oauth-agent"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["metrics", "rate-limit"]
+# The tests against the local cluster (tests/e2e.rs) only run with `--features e2e`, so a plain
+# `cargo test` needs no cluster.
+e2e = []
+# Per-client limit on sign-in starts, kept in Redis. Leave it out when something in front,
+# such as Cloudflare, already limits /auth/login.
+rate-limit = []
+# Prometheus metrics on a separate address (METRICS_ADDR); no extra dependencies.
+metrics = []
+
+[dependencies]
+async-trait.workspace        = true
+axum                         = { workspace = true }
+base64.workspace             = true
+jsonwebtoken.workspace       = true
+token-handler-common                   = { path = "../token-handler-common" }
+oidc                         = { path = "../oidc" }
+redis                        = { workspace = true, features = ["tokio-comp", "connection-manager"] }
+reqwest                      = { workspace = true }
+ring                         = { workspace = true }
+serde.workspace              = true
+serde_json.workspace         = true
+subtle                       = { workspace = true }
+thiserror.workspace          = true
+time.workspace               = true
+tokio.workspace              = true
+tracing.workspace            = true
+
+[dev-dependencies]
+axum.workspace  = true
+regex.workspace = true
+tower = { workspace = true, features = ["util"] }
+# The e2e tests' raw HTTPS request, which an HTTP client would normalise.
+rustls                   = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+rustls-platform-verifier = "0.7"
+tokio-rustls             = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }

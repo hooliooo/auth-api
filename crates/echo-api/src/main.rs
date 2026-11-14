@@ -1,14 +1,15 @@
-//! Test-only helpers for the BFF's e2e tests, in one small service.
+//! Test-only helpers for the OAuth agent's e2e tests, in one small service.
 //!
-//! - Port 8000, the stand-in API behind the BFF proxy: `/echo/...` answers with what it
+//! - Port 8000, the stand-in API behind the OAuth proxy: `/echo/...` answers with what it
 //!   received, `/slow` streams one chunk a second.
 //! - Port 8000, `/relay/backchannel-logout`: records a back-channel logout token and passes the
-//!   call on to the BFF, so a test can replay the token afterwards.
+//!   call on to the OAuth agent, so a test can replay the token afterwards.
 //! - Port 8000, `/faults`: arms a one-shot failure for the Keycloak proxy.
-//! - Port 8081, a proxy in front of Keycloak for the BFF's server-to-server calls; answers an
-//!   armed fault instead of forwarding the matching request. With `PROXY_TLS_CERT` and
-//!   `PROXY_TLS_KEY` it serves HTTPS with that certificate, so a BFF that resolves Keycloak's
-//!   public name to this proxy reaches it at the same `https://` address as everyone else.
+//! - Port 8081, a proxy in front of Keycloak for the OAuth agent's server-to-server calls; answers
+//!   an armed fault instead of forwarding the matching request. With `PROXY_TLS_CERT` and
+//!   `PROXY_TLS_KEY` it serves HTTPS with that certificate, so an OAuth agent that resolves
+//!   Keycloak's public name to this proxy reaches it at the same `https://` address as everyone
+//!   else.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -55,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         keycloak: env("KEYCLOAK_URL", "https://keycloak-api"),
         backchannel_target: env(
             "BACKCHANNEL_TARGET",
-            "http://bff:5100/auth/backchannel-logout",
+            "http://oauth-agent:5100/auth/backchannel-logout",
         ),
         faults: Mutex::default(),
         logout_tokens: Mutex::default(),
@@ -140,7 +141,7 @@ async fn echo(method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Resp
         "body": String::from_utf8_lossy(&body),
     }))
     .into_response();
-    // The BFF must strip this before it reaches the browser.
+    // The OAuth proxy must strip this before it reaches the browser.
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_static("planted=1; Path=/"),

@@ -1,0 +1,59 @@
+# The OAuth proxy (crates/oauth-proxy) of the token handler pattern: a reverse proxy, and the
+# single origin at https://auth-api. It answers /api/* itself, with the session's access token from Redis, and
+# passes everything else to the OAuth agent. Fresh access tokens come from the OAuth agent's
+# internal endpoint, so only the OAuth agent holds the client's credentials.
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth-proxy
+  labels: { app: oauth-proxy }
+spec:
+  selector: { app: oauth-proxy }
+  ports:
+    - name: http
+      port: 5200
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: oauth-proxy }
+  template:
+    metadata:
+      labels: { app: oauth-proxy }
+    spec:
+      containers:
+        - name: oauth-proxy
+          image: auth-api/oauth-proxy:dev
+          imagePullPolicy: Never
+          env:
+            - { name: RUST_LOG, value: "oauth_proxy=debug,info" }
+            - { name: AGENT_URL, value: "http://oauth-agent:5100" }
+            - { name: AGENT_INTERNAL_URL, value: "http://oauth-agent:5101" }
+            - { name: INTERNAL_SECRET_FILE, value: /run/secrets/internal/secret }
+            - { name: REDIS_URI, value: redis://redis:6379 }
+            # As the OAuth agent's: the ingress sets X-Real-Ip; only the pod network is believed.
+            - { name: CLIENT_IP_HEADER, value: x-real-ip }
+            - { name: TRUSTED_PROXIES, value: 10.244.0.0/16 }
+            # API_BASE_URL is not set until the API runs in the cluster: /api/* answers 503.
+          ports:
+            - name: http
+              containerPort: 5200
+            - name: metrics
+              containerPort: 9100
+          # Through the proxy to the OAuth agent: ready when both are.
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: internal, mountPath: /run/secrets/internal, readOnly: true }
+      volumes:
+        - name: internal
+          secret:
+            secretName: oauth-agent-internal

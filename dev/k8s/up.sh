@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Creates or updates the local Kubernetes cluster (kind) and deploys Keycloak and the BFF to it,
-# served at https://keycloak-api and https://auth-api with certificates from the local
+# Creates or updates the local Kubernetes cluster (kind) and deploys Keycloak and the OAuth agent to
+# it, served at https://keycloak-api and https://auth-api with certificates from the local
 # development CA.
 #
 # Once per machine: brew install kind helm mkcert nss && mkcert -install
 # and in /etc/hosts:  127.0.0.1 keycloak-api auth-api
 #
 #   dev/k8s/up.sh        # idempotent: rerun after changing manifests or images
-#   dev/k8s/up.sh --e2e  # the same plus the BFF e2e tests' helpers (deploy/e2e)
+#   dev/k8s/up.sh --e2e  # the same plus the OAuth agent e2e tests' helpers (deploy/e2e)
 #   dev/k8s/down.sh      # deletes the cluster
 #
 # Every kubectl and helm call names the cluster's own context, so no other cluster (such as a
@@ -106,10 +106,11 @@ if ! grep -q 'auth-api public names' <<<"$corefile"; then
 fi
 
 step "Images"
-images=(auth-api/keycloak:dev auth-api/keycloak-config:dev auth-api/bff:dev)
+images=(auth-api/keycloak:dev auth-api/keycloak-config:dev auth-api/oauth-agent:dev auth-api/oauth-proxy:dev)
 docker build -t auth-api/keycloak:dev "$root/iam-config/keycloak"
 docker build -t auth-api/keycloak-config:dev "$root/iam-config/keycloak-config"
-docker build -t auth-api/bff:dev -f "$root/crates/bff/Dockerfile" "$root"
+docker build -t auth-api/oauth-agent:dev -f "$root/crates/oauth-agent/Dockerfile" "$root"
+docker build -t auth-api/oauth-proxy:dev -f "$root/crates/oauth-proxy/Dockerfile" "$root"
 if [[ "$overlay" == e2e ]]; then
   docker build -t auth-api/echo-api:dev -f "$root/crates/echo-api/Dockerfile" "$root"
   images+=(auth-api/echo-api:dev)
@@ -130,13 +131,15 @@ random() { openssl rand -base64 24 | tr -d '/+=' | head -c 24; }
 secret_once keycloak-admin username=admin "password=$(random)"
 secret_once keycloak-db "password=$(random)"
 secret_once keycloak-clients "api-client-secret=$(random)" "end-to-end-client-secret=$(random)"
+# Between the OAuth proxy and the OAuth agent's internal endpoint.
+secret_once oauth-agent-internal "secret=$(random)"
 k -n auth-api create configmap keycloak-config-scripts \
   --from-file="$root/iam-config/keycloak-config/setup-scripts" \
   --dry-run=client -o yaml | k apply -f -
-# The BFF's client key: this machine's own, made once by the script and never committed.
-"$root/crates/bff/dev/generate-client-key.sh" >/dev/null
-k -n auth-api create secret generic bff-client-key \
-  --from-file=client-key.pem="$root/crates/bff/dev/client-key.pem" \
+# The OAuth agent's client key: this machine's own, made once by the script and never committed.
+"$root/crates/oauth-agent/dev/generate-client-key.sh" >/dev/null
+k -n auth-api create secret generic oauth-agent-client-key \
+  --from-file=client-key.pem="$root/crates/oauth-agent/dev/client-key.pem" \
   --dry-run=client -o yaml | k apply -f -
 # The local CA's certificate (public only), for pods that call https://keycloak-api.
 k -n auth-api create configmap local-ca --from-file=ca.crt="$ca_root/rootCA.pem" \
@@ -163,7 +166,7 @@ else
   fi
 fi
 
-step "BFF"
+step "OAuth agent"
 # Restarts the deployments named, and returns once only their new pods are left: a rollout
 # counts as done when the new pods are ready, while the old ones may still be stopping and
 # reachable. The test helpers keep their state in memory, so nothing may reach an old one.
@@ -183,23 +186,24 @@ restart() { # <deployment>...
 k -n auth-api rollout status deployment redis --timeout=120s
 if [[ "$overlay" == e2e ]]; then
   restart echo-api
-  restart bff bff-oidc bff-untrusted
+  restart oauth-agent oauth-agent-oidc oauth-agent-untrusted
 else
-  restart bff
+  restart oauth-agent
 fi
+restart oauth-proxy
 k -n auth-api wait certificate auth-api-tls --for=condition=Ready --timeout=120s
 
 cat <<DONE
 
 Keycloak:       https://keycloak-api            (admin console: https://keycloak-api/admin)
 Test realm:     https://keycloak-api/realms/test/account   (user alice, password test)
-BFF:            https://auth-api/auth/login     (signs in as above; https://auth-api/auth/session shows who)
+OAuth agent:    https://auth-api/auth/login     (signs in as above; https://auth-api/auth/session shows who)
 Admin password: kubectl --context $ctx -n auth-api get secret keycloak-admin -o jsonpath='{.data.password}' | base64 -d
 Emails:         kubectl --context $ctx -n auth-api port-forward service/smtp-server 1080, then http://localhost:1080
 DONE
 if ! grep -Eq '^[[:space:]]*127\.0\.0\.1[[:space:]]([^#]*[[:space:]])?auth-api([[:space:]]|$)' /etc/hosts; then
-  echo "To open the BFF in a browser: echo '127.0.0.1 auth-api' | sudo tee -a /etc/hosts"
+  echo "To open the OAuth agent in a browser: echo '127.0.0.1 auth-api' | sudo tee -a /etc/hosts"
 fi
 if [[ "$overlay" == e2e ]]; then
-  echo "E2E tests:      cargo test -p bff --features e2e --test e2e"
+  echo "E2E tests:      cargo test -p oauth-agent --features e2e --test e2e"
 fi

@@ -1,9 +1,9 @@
 # Local Kubernetes
 
-Keycloak and the BFF in a local Kubernetes cluster (kind), as close to production as a laptop
-allows: an ingress controller terminating TLS with cert-manager certificates, one public address
-per service that browsers and pods share, and secrets generated at setup rather than kept in the
-repo.
+Keycloak and the token handler (the OAuth agent and the OAuth proxy) in a local Kubernetes
+cluster (kind), as close to production as a laptop allows: an ingress controller terminating TLS
+with cert-manager certificates, one public address per service that browsers and pods share, and
+secrets generated at setup rather than kept in the repo.
 
 ## Once per machine
 
@@ -33,7 +33,7 @@ integration, and add the hosts entry to Windows' own hosts file
 
 ```sh
 dev/k8s/up.sh        # creates or updates the cluster; safe to rerun
-dev/k8s/up.sh --e2e  # the same plus the BFF e2e tests' helpers (see "E2E tests")
+dev/k8s/up.sh --e2e  # the same plus the OAuth agent e2e tests' helpers (see "E2E tests")
 dev/k8s/down.sh      # deletes the cluster, database included
 ```
 
@@ -52,18 +52,24 @@ leaves your default context as it was, so a shared cluster in your kubeconfig is
 | Keycloak | `deploy/k8s/keycloak.yaml` | Keycloak, from `iam-config/keycloak`, at `https://keycloak-api` |
 | Realm setup | `deploy/k8s/keycloak-config-job.yaml` | `iam-config/keycloak-config/setup-scripts`, run once |
 | Mail catcher | `deploy/k8s/smtp.yaml` | the SMTP server |
-| BFF | `deploy/k8s/bff.yaml` | the BFF, from `crates/bff`, at `https://auth-api` |
-| Redis | `deploy/k8s/redis.yaml` | the managed Redis holding the BFF's sessions |
+| OAuth proxy | `deploy/k8s/oauth-proxy.yaml` | the reverse proxy and origin at `https://auth-api`, from `crates/oauth-proxy`: answers `/api/*` with the session's access token, passes the rest to the OAuth agent |
+| OAuth agent | `deploy/k8s/oauth-agent.yaml` | the OAuth agent, from `crates/oauth-agent`, behind the OAuth proxy: sign-in, sessions, refresh; its internal endpoint gives the proxy fresh access tokens |
+| Redis | `deploy/k8s/redis.yaml` | the managed Redis holding the OAuth agent's sessions |
 
 Keycloak's issuer is `https://keycloak-api/realms/test` for browsers and pods alike, so services
 need no separate discovery address. Pods that call `https://keycloak-api` must trust the local
 CA: mount the `local-ca` ConfigMap's `ca.crt` (its public certificate, which `up.sh` creates) and
-point `SSL_CERT_FILE` at it, as the BFF does.
+point `SSL_CERT_FILE` at it, as the OAuth agent does.
 
-The BFF signs in with its own key (`private_key_jwt`): `up.sh` runs
-`crates/bff/dev/generate-client-key.sh` once, which writes this machine's key to
-`crates/bff/dev/client-key.pem` (never committed), and copies it into the `bff-client-key`
-secret. Keycloak fetches the matching public key from the BFF itself.
+The OAuth proxy and the OAuth agent share a secret (`oauth-agent-internal`, made once by `up.sh`):
+the proxy sends it to the OAuth agent's internal endpoint (port 5101, never behind the ingress) when
+an access token needs refreshing, so only the OAuth agent holds the client's credentials.
+
+The OAuth agent signs in with its own key (`private_key_jwt`): `up.sh` runs
+`crates/oauth-agent/dev/generate-client-key.sh` once, which writes this machine's key to
+`crates/oauth-agent/dev/client-key.pem` (never committed), and copies it into the
+`oauth-agent-client-key` secret. Keycloak fetches the matching public key from the OAuth agent
+itself.
 
 ## How the certificates work
 
@@ -106,33 +112,34 @@ rewrite already covers `auth-api`).
 
 ## E2E tests
 
-The BFF's end-to-end tests (`crates/bff/tests/e2e.rs`) run against this cluster, through the
-ingress, so they sign in the way a browser does: across sites, over HTTPS, with Keycloak at its
-one public address.
+The OAuth agent's end-to-end tests (`crates/oauth-agent/tests/e2e.rs`) run against this cluster,
+through the ingress, so they sign in the way a browser does: across sites, over HTTPS, with Keycloak
+at its one public address.
 
 ```sh
 dev/k8s/up.sh --e2e
-cargo test -p bff --features e2e --test e2e
+cargo test -p oauth-agent --features e2e --test e2e
 ```
 
 `--e2e` applies `deploy/e2e` instead of `deploy/k8s`: everything above plus
 
 | Piece | Where | What for |
 |---|---|---|
-| echo-api | `deploy/e2e/echo-api.yaml`, from `crates/echo-api` | the BFF's API: answers with what it received; records Keycloak's back-channel logouts; a proxy in front of Keycloak that fails a request once when told to |
-| BFF settings | `deploy/e2e/bff-patch.yaml` | the BFF under test uses the echo API, reads each simulated browser's address from `cf-connecting-ip`, and reaches Keycloak through the proxy |
-| `bff-oidc`, `bff-untrusted` | `deploy/e2e/bff-variants.yaml` | BFFs treating Keycloak as any OpenID Connect provider, and trusting no proxy, at `https://auth-api-oidc` and `https://auth-api-untrusted` |
-| Test access | `deploy/e2e/test-access.yaml` | Redis, the BFF's metrics and the helpers' controls on `127.0.0.1:16379`, `:19100` and `:19199` |
+| echo-api | `deploy/e2e/echo-api.yaml`, from `crates/echo-api` | the OAuth proxy's API: answers with what it received; records Keycloak's back-channel logouts; a proxy in front of Keycloak that fails a request once when told to |
+| OAuth agent settings | `deploy/e2e/oauth-agent-patch.yaml` | the OAuth agent under test reads each simulated browser's address from `cf-connecting-ip`, and reaches Keycloak through the proxy |
+| OAuth proxy settings | `deploy/e2e/oauth-proxy-patch.yaml` | the OAuth proxy under test uses the echo API and reads each simulated browser's address from `cf-connecting-ip` |
+| `oauth-agent-oidc`, `oauth-agent-untrusted` | `deploy/e2e/oauth-agent-variants.yaml` | OAuth agents treating Keycloak as any OpenID Connect provider, and trusting no proxy, at `https://auth-api-oidc` and `https://auth-api-untrusted` |
+| Test access | `deploy/e2e/test-access.yaml` | Redis, the OAuth agent's and the OAuth proxy's metrics, and the helpers' controls on `127.0.0.1:16379`, `:19100`, `:19101` and `:19199` |
 
-- **The Keycloak proxy keeps one address.** It answers as `https://keycloak-api`, with a
-  certificate for that name from the local CA, on a Service with a fixed address; the BFF under
-  test resolves `keycloak-api` to it (`hostAliases`). The BFF code runs unchanged: only where
-  the name leads differs.
+- **The Keycloak proxy keeps one address.** It answers as `https://keycloak-api`, with a certificate
+  for that name from the local CA, on a Service with a fixed address; the OAuth agent under test
+  resolves `keycloak-api` to it (`hostAliases`). The OAuth agent code runs unchanged: only where the
+  name leads differs.
 - **No extra hosts entries.** The tests resolve `auth-api`, `auth-api-oidc`,
   `auth-api-untrusted` and `keycloak-api` to the ingress themselves (`E2E_INGRESS_ADDR`, default
   `127.0.0.1:443`).
 - **Keycloak admin calls** use the realm's end-to-end client; its secret is read from the
-  cluster with kubectl unless `E2E_CLIENT_SECRET` is set. The tests register `bff-oidc`'s
-  addresses with the `bff` client on their first run.
-- **Back to a normal cluster:** `up.sh` without `--e2e` restores the BFF's own settings; the
+  cluster with kubectl unless `E2E_CLIENT_SECRET` is set. The tests register `oauth-agent-oidc`'s
+  addresses with the `oauth-agent` client on their first run.
+- **Back to a normal cluster:** `up.sh` without `--e2e` restores the OAuth agent's own settings; the
   helpers stay until `dev/k8s/down.sh`.

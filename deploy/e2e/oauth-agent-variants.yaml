@@ -1,0 +1,173 @@
+# Two more OAuth agents the tests compare against, sharing Redis, Keycloak and the client key with
+# the OAuth agent under test, each at its own address behind the ingress:
+#
+# - oauth-agent-oidc (https://auth-api-oidc): treats Keycloak as any OpenID Connect provider
+#   (IDENTITY_PROVIDER=oidc), to check what the OAuth agent does without Keycloak's extensions.
+# - oauth-agent-untrusted (https://auth-api-untrusted): trusts no proxy, so its client address
+#   header is ignored whoever sets it.
+#
+# The tests reach both names without hosts-file entries: they resolve them to the ingress
+# themselves.
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth-agent-oidc
+  labels: { app: oauth-agent-oidc }
+spec:
+  selector: { app: oauth-agent-oidc }
+  ports:
+    - name: http
+      port: 5100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth-agent-oidc
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: oauth-agent-oidc }
+  template:
+    metadata:
+      labels: { app: oauth-agent-oidc }
+    spec:
+      containers:
+        - name: oauth-agent
+          image: auth-api/oauth-agent:dev
+          imagePullPolicy: Never
+          env:
+            - { name: RUST_LOG, value: "oauth_agent=debug,oidc=debug,info" }
+            - { name: ISSUER_URI, value: https://keycloak-api/realms/test }
+            - { name: CLIENT_ID, value: oauth-agent }
+            - { name: IDENTITY_PROVIDER, value: oidc }
+            - { name: CLIENT_CREDENTIALS, value: private_key_jwt }
+            - { name: CLIENT_KEY_FILE, value: /run/secrets/oauth-agent/client-key.pem }
+            - { name: REDIRECT_URI, value: https://auth-api-oidc/auth/callback }
+            - { name: REDIS_URI, value: redis://redis:6379 }
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            - { name: TRUSTED_PROXIES, value: 10.244.0.0/16 }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 5100
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: client-key, mountPath: /run/secrets/oauth-agent, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: client-key
+          secret:
+            secretName: oauth-agent-client-key
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oauth-agent-oidc
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [auth-api-oidc]
+      secretName: auth-api-oidc-tls
+  rules:
+    - host: auth-api-oidc
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth-agent-oidc
+                port: { name: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth-agent-untrusted
+  labels: { app: oauth-agent-untrusted }
+spec:
+  selector: { app: oauth-agent-untrusted }
+  ports:
+    - name: http
+      port: 5100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth-agent-untrusted
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: oauth-agent-untrusted }
+  template:
+    metadata:
+      labels: { app: oauth-agent-untrusted }
+    spec:
+      containers:
+        - name: oauth-agent
+          image: auth-api/oauth-agent:dev
+          imagePullPolicy: Never
+          env:
+            - { name: RUST_LOG, value: "oauth_agent=debug,oidc=debug,info" }
+            - { name: ISSUER_URI, value: https://keycloak-api/realms/test }
+            - { name: CLIENT_ID, value: oauth-agent }
+            - { name: IDENTITY_PROVIDER, value: keycloak }
+            - { name: CLIENT_CREDENTIALS, value: private_key_jwt }
+            - { name: CLIENT_KEY_FILE, value: /run/secrets/oauth-agent/client-key.pem }
+            - { name: REDIRECT_URI, value: https://auth-api-untrusted/auth/callback }
+            - { name: REDIS_URI, value: redis://redis:6379 }
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            # TEST-NET-3: no connection ever comes from here, so the header is never believed.
+            - { name: TRUSTED_PROXIES, value: 203.0.113.1/32 }
+            - { name: LOGIN_RATE_LIMIT_PER_MINUTE, value: "10" }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 5100
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: client-key, mountPath: /run/secrets/oauth-agent, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: client-key
+          secret:
+            secretName: oauth-agent-client-key
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oauth-agent-untrusted
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [auth-api-untrusted]
+      secretName: auth-api-untrusted-tls
+  rules:
+    - host: auth-api-untrusted
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth-agent-untrusted
+                port: { name: http }

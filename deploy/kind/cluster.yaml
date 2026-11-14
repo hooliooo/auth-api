@@ -20,13 +20,18 @@ nodes:
         listenAddress: "127.0.0.1"
         protocol: TCP
       # For the e2e tests only (deploy/e2e/test-access.yaml); nothing listens without --e2e.
-      # Redis, the BFF's metrics and the test helpers' controls.
+      # Redis, the OAuth agent's metrics and the test helpers' controls.
       - containerPort: 30379
         hostPort: 16379
         listenAddress: "127.0.0.1"
         protocol: TCP
       - containerPort: 30910
         hostPort: 19100
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # The OAuth proxy's metrics: it counts the /api/* calls it answers.
+      - containerPort: 30911
+        hostPort: 19101
         listenAddress: "127.0.0.1"
         protocol: TCP
       - containerPort: 30999

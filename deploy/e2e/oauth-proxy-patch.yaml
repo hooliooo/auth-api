@@ -1,0 +1,14 @@
+# The OAuth proxy under test: the echo API as its API, and each simulated browser's address in
+# the header the ingress passes through untouched, as for the OAuth agent (oauth-agent-patch.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth-proxy
+spec:
+  template:
+    spec:
+      containers:
+        - name: oauth-proxy
+          env:
+            - { name: API_BASE_URL, value: "http://echo-api:8000" }
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }

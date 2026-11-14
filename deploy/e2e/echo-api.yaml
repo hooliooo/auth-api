@@ -1,11 +1,12 @@
-# The test helpers (crates/echo-api): the stand-in API behind the BFF, the recorder for
+# The test helpers (crates/echo-api): the stand-in API behind the OAuth proxy, the recorder for
 # Keycloak's back-channel logouts, and a proxy in front of Keycloak that can be told to fail a
 # request once.
 #
-# The proxy answers as https://keycloak-api, with a certificate for that name from the local CA,
-# on a Service with a fixed address; the BFF under test resolves keycloak-api to that address
-# (bff-patch.yaml), so its Keycloak calls pass through the proxy while it still uses Keycloak's
-# one public address. The proxy itself reaches Keycloak through the ingress, like any pod.
+# The proxy answers as https://keycloak-api, with a certificate for that name from the local CA, on
+# a Service with a fixed address; the OAuth agent under test resolves keycloak-api to that address
+# (oauth-agent-patch.yaml), so its Keycloak calls pass through the proxy while it still uses
+# Keycloak's one public address. The proxy itself reaches Keycloak through the ingress, like any
+# pod.
 apiVersion: v1
 kind: Service
 metadata:
@@ -24,8 +25,8 @@ metadata:
   labels: { app: echo-api }
 spec:
   selector: { app: echo-api }
-  # Fixed, for the BFF's hostAliases. From the low end of the service range, which Kubernetes
-  # keeps for fixed addresses and never hands out on its own.
+  # Fixed, for the OAuth agent's hostAliases. From the low end of the service range, which
+  # Kubernetes keeps for fixed addresses and never hands out on its own.
   clusterIP: 10.96.0.200
   ports:
     - name: https
@@ -61,7 +62,7 @@ spec:
           imagePullPolicy: Never
           env:
             - { name: KEYCLOAK_URL, value: https://keycloak-api }
-            - { name: BACKCHANNEL_TARGET, value: http://bff:5100/auth/backchannel-logout }
+            - { name: BACKCHANNEL_TARGET, value: http://oauth-agent:5100/auth/backchannel-logout }
             - { name: PROXY_TLS_CERT, value: /etc/proxy-tls/tls.crt }
             - { name: PROXY_TLS_KEY, value: /etc/proxy-tls/tls.key }
             - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }

@@ -49,9 +49,9 @@ services:
       api_client_secret: "authentication.layer.api.secret"
       end_to_end_client_id: "end.to.end.client"
       end_to_end_client_secret: "end.to.end.client.secret"
-      bff_client_id: "bff"
-      bff_base_url: "http://localhost:5100"
-      bff_internal_url: "http://bff:5100"
+      agent_client_id: "oauth-agent"
+      agent_base_url: "http://localhost:5100"
+      agent_internal_url: "http://oauth-agent:5100"
     command: |
       bash -c '
         echo "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"

@@ -1,0 +1,18 @@
+# The OAuth agent under test: each simulated browser's address in a header the
+# ingress passes through untouched (as behind Cloudflare), and its calls to Keycloak through the
+# fault-injecting proxy, which answers at Keycloak's own address (echo-api.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth-agent
+spec:
+  template:
+    spec:
+      hostAliases:
+        - ip: 10.96.0.200 # the keycloak-proxy Service
+          hostnames: [keycloak-api]
+      containers:
+        - name: oauth-agent
+          env:
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            - { name: LOGIN_RATE_LIMIT_PER_MINUTE, value: "10" }

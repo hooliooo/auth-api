@@ -10,14 +10,16 @@ members  = [
   # "crates/api/adapters/outbound/nats-event-publisher",
   # "crates/api/adapters/outbound/write-model",
 
-  "crates/bff",
+  "crates/oauth-agent",
+  "crates/token-handler-common",
   "crates/echo-api",
   "crates/oidc",
+  "crates/oauth-proxy",
 ]
 
 [workspace.dependencies]
 anyhow                 = { version = "1.0.104" }
-async-nats             = { version = "0.51.0" }
+async-nats             = { version = "0.52.0" }
 async-trait            = "0.1.92"
 axum                   = { version = "0.8.9", features = ["json", "tracing"] }
 axum-extra             = { version = "0.12.6", features = ["typed-header"] }
@@ -25,6 +27,7 @@ base64                 = { version = "0.23.1" }
 chrono                 = "0.4.45"
 ctor                   = "1.0.13"
 dtor                   = "1.0.6"
+http                   = "1.5.0"  
 kern                   = { version = "0.1.0", git = "https://github.com/hooliooo/kern.git", features = [
   "axum",
   "event_bus",
@@ -33,7 +36,7 @@ kern                   = { version = "0.1.0", git = "https://github.com/hooliooo
   "validator",
 ] }
 # aws-lc: the same crypto library rustls already uses; avoids the pure-Rust `rsa` crate.
-jsonwebtoken           = { version = "11.1.0", features = ["aws_lc_rs"] }
+jsonwebtoken           = { version = "12.0.0", features = ["aws_lc_rs"] }
 mockall                = "0.15.0"
 redis                  = { version = "1.7.1" }
 regex                  = { version = "1.13.1", features = ["std", "logging"] }
