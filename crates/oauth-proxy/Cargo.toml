@@ -1,0 +1,18 @@
+[package]
+name    = "oauth-proxy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The token handler pattern's OAuth proxy: a reverse proxy and the single origin in front of the SPA's API calls and the OAuth agent, turning the session cookie into a bearer token on every /api/* call."
+
+[dependencies]
+axum                         = { workspace = true }
+token-handler-common                   = { path = "../token-handler-common" }
+redis                        = { workspace = true, features = ["tokio-comp", "connection-manager"] }
+reqwest                      = { workspace = true, features = ["stream"] }
+thiserror.workspace          = true
+tokio.workspace              = true
+tracing.workspace            = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }

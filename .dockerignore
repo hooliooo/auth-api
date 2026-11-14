@@ -4,4 +4,4 @@ target
 iam-config
 **/.DS_Store
 # The local client key reaches the cluster as a secret, never through an image.
-crates/bff/dev/*.pem
+crates/oauth-agent/dev/*.pem

@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# Test-only helpers for the BFF's e2e tests: a stand-in API, a fault-injecting proxy in front of
-# Keycloak, and a recorder for Keycloak's back-channel logout calls.
+# Test-only helpers for the OAuth agent's e2e tests: a stand-in API, a fault-injecting proxy in
+# front of Keycloak, and a recorder for Keycloak's back-channel logout calls.
 [dependencies]
 axum         = { workspace = true }
 axum-server  = { version = "0.8.0", features = ["tls-rustls"] }

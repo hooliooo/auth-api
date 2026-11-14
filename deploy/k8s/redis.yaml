@@ -1,4 +1,4 @@
-# The BFF's session store, standing in for the managed Redis in production. No persistence:
+# The OAuth agent's session store, standing in for the managed Redis in production. No persistence:
 # restarting it signs everyone out, as losing the managed one would.
 apiVersion: v1
 kind: Service

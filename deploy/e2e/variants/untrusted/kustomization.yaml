@@ -1,0 +1,13 @@
+# oauth-agent-untrusted: the OAuth agent's manifest under its own name, label and address; see
+# ../README.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../k8s/oauth-agent
+nameSuffix: -untrusted
+labels:
+  - pairs: { app: oauth-agent-untrusted }
+    includeSelectors: true
+    includeTemplates: true
+patches:
+  - path: patch.yaml

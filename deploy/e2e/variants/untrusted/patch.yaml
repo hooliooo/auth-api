@@ -1,0 +1,35 @@
+# Trusts no proxy, at its own address.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth-agent
+spec:
+  template:
+    spec:
+      containers:
+        - name: oauth-agent
+          env:
+            - { name: REDIRECT_URI, value: https://auth-api-untrusted/auth/callback }
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            # TEST-NET-3: no connection ever comes from here, so the header is never believed.
+            - { name: TRUSTED_PROXIES, value: 203.0.113.1/32 }
+            - { name: LOGIN_RATE_LIMIT_PER_MINUTE, value: "10" }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oauth-agent
+spec:
+  tls:
+    - hosts: [auth-api-untrusted]
+      secretName: auth-api-untrusted-tls
+  rules:
+    - host: auth-api-untrusted
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth-agent-untrusted
+                port: { name: http }

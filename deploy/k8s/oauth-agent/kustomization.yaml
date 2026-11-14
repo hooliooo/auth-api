@@ -1,0 +1,6 @@
+# The OAuth agent, in a directory of its own so the e2e variants (deploy/e2e/variants) can build
+# from the same manifest.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - oauth-agent.yaml

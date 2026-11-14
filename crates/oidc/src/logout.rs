@@ -92,7 +92,7 @@ mod tests {
     fn token() -> Value {
         json!({
             "iss": "https://idp.example/realms/test",
-            "aud": "bff",
+            "aud": "oauth-agent",
             "iat": NOW,
             "exp": NOW + 120,
             "jti": "logout-1",

@@ -93,26 +93,21 @@ end_to_end_client_uuid=$($kcadm get -r $realm clients -q clientId="$end_to_end_c
 echo "e2e client uuid: $end_to_end_client_uuid"
 add_auth_layer_aud_mapper_to_client "$end_to_end_client_uuid" "$end_to_end_client_id"
 
-echo "* $bff_client_id"
-  # Client scopes: the defaults are in every token whatever the BFF asks for, so only what the
-  # API needs: the subject and session (basic), roles, and acr. profile and email are optional,
-  # for a BFF configured to request them (OIDC_SCOPES); web-origins, offline_access, phone,
-  # address and the rest are not available to this client at all.
-  # No client secret: the BFF authenticates with assertions signed by its private key
-  # (private_key_jwt); Keycloak fetches the public key from the BFF's JWKS URL.
-  # Every BFF origin that may sign in: the BFF, plus any in space-separated
-  # `bff_extra_base_urls` (e.g. the e2e stack's BFF for a standard OpenID Connect provider).
-  bff_redirect_uris=""
-  bff_post_logout_uris=""
-  for url in $bff_base_url ${bff_extra_base_urls:-}; do
-    bff_redirect_uris+="${bff_redirect_uris:+,}\"$url/auth/callback\""
-    bff_post_logout_uris+="${bff_post_logout_uris:+##}$url/"
-  done
+echo "* $agent_client_id"
+  # Client scopes: the defaults are in every token whatever the OAuth agent asks for, so only what
+  # the API needs: the subject and session (basic), roles, and acr. profile and email are optional,
+  # for an OAuth agent configured to request them (OIDC_SCOPES); web-origins, offline_access, phone,
+  # address and the rest are not available to this client at all. No client secret: the OAuth agent
+  # authenticates with assertions signed by its private key (private_key_jwt); Keycloak fetches the
+  # public key from the OAuth agent's JWKS URL. It signs users in at `agent_base_url` (the e2e
+  # tests add their other test agents' addresses themselves).
+  agent_redirect_uris="\"$agent_base_url/auth/callback\""
+  agent_post_logout_uris="$agent_base_url/"
 
-  bff_client_uuid=$($kcadm create -r $realm clients -i -f - <<<"
+  agent_client_uuid=$($kcadm create -r $realm clients -i -f - <<<"
   {
-    \"clientId\": \"$bff_client_id\",
-    \"name\": \"BFF\",
+    \"clientId\": \"$agent_client_id\",
+    \"name\": \"OAuth agent\",
     \"clientAuthenticatorType\": \"client-jwt\",
     \"publicClient\": false,
     \"standardFlowEnabled\": true,
@@ -123,23 +118,23 @@ echo "* $bff_client_id"
     \"fullScopeAllowed\": false,
     \"defaultClientScopes\": [\"basic\", \"roles\", \"acr\"],
     \"optionalClientScopes\": [\"profile\", \"email\"],
-    \"redirectUris\": [$bff_redirect_uris],
+    \"redirectUris\": [$agent_redirect_uris],
     \"attributes\": {
       \"pkce.code.challenge.method\": \"S256\",
-      \"post.logout.redirect.uris\": \"$bff_post_logout_uris\",
-      \"backchannel.logout.url\": \"$bff_internal_url/auth/backchannel-logout\",
+      \"post.logout.redirect.uris\": \"$agent_post_logout_uris\",
+      \"backchannel.logout.url\": \"$agent_internal_url/auth/backchannel-logout\",
       \"backchannel.logout.session.required\": \"true\",
       \"use.jwks.url\": \"true\",
-      \"jwks.url\": \"$bff_internal_url/.well-known/jwks.json\",
+      \"jwks.url\": \"$agent_internal_url/.well-known/jwks.json\",
       \"token.endpoint.auth.signing.alg\": \"ES256\"
     }
   }")
 
-  # The BFF forwards its users' access tokens to the API, so they must name the API as audience.
-  # Access tokens only: ID tokens stay addressed to the BFF alone.
-  $kcadm create -r $realm clients/$bff_client_uuid/protocol-mappers/models -f - <<EOF
+  # The OAuth proxy forwards the OAuth agent's users' access tokens to the API, so they must name
+  # the API as audience. Access tokens only: ID tokens stay addressed to the OAuth agent alone.
+  $kcadm create -r $realm clients/$agent_client_uuid/protocol-mappers/models -f - <<EOF
     {
-     "name": "$bff_client_id-auth-layer-aud",
+     "name": "$agent_client_id-auth-layer-aud",
      "protocol": "openid-connect",
      "protocolMapper": "oidc-audience-mapper",
      "config": {
@@ -151,7 +146,7 @@ echo "* $bff_client_id"
 EOF
 
   # Full scope is off: tokens carry only the roles mapped here, i.e. the ones the API acts on.
-  $kcadm create -r $realm clients/$bff_client_uuid/scope-mappings/realm \
+  $kcadm create -r $realm clients/$agent_client_uuid/scope-mappings/realm \
     -b "[$($kcadm get -r $realm roles/multi-tenancy-admin)]"
 
   echo "* test user"
