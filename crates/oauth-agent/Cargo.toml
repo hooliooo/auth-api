@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [features]
-default = ["metrics", "rate-limit"]
+default = ["e2e", "metrics", "rate-limit"]
 # The tests against the local cluster (tests/e2e.rs) only run with `--features e2e`, so a plain
 # `cargo test` needs no cluster.
 e2e = []
@@ -20,7 +20,7 @@ async-trait.workspace        = true
 axum                         = { workspace = true }
 base64.workspace             = true
 jsonwebtoken.workspace       = true
-token-handler-common                   = { path = "../token-handler-common" }
+token-handler-common         = { path = "../token-handler-common" }
 oidc                         = { path = "../oidc" }
 redis                        = { workspace = true, features = ["tokio-comp", "connection-manager"] }
 reqwest                      = { workspace = true }
