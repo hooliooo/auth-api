@@ -3,6 +3,12 @@
 # ingress), and trusts the local CA for that from the local-ca ConfigMap. Its client key is the one
 # crates/oauth-agent/dev/generate-client-key.sh made on this machine; dev/k8s/up.sh copies it into
 # the oauth-agent-client-key secret.
+# The agent's identity in the mesh: the AuthorizationPolicy of anyone it calls can name it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: oauth-agent
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -30,6 +36,7 @@ spec:
     metadata:
       labels: { app: oauth-agent }
     spec:
+      serviceAccountName: oauth-agent
       containers:
         - name: oauth-agent
           image: auth-api/oauth-agent:dev
@@ -48,8 +55,9 @@ spec:
             - { name: CLIENT_IP_HEADER, value: x-real-ip }
             - { name: TRUSTED_PROXIES, value: 10.244.0.0/16 }
             - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
-            # The OAuth proxy's way to fresh access tokens (crates/oauth-agent/src/internal.rs).
-            - { name: INTERNAL_SECRET_FILE, value: /run/secrets/internal/secret }
+            # The OAuth proxy's way to fresh access tokens (crates/oauth-agent/src/internal.rs):
+            # plain HTTP, which the mesh encrypts and the AuthorizationPolicy below restricts.
+            - { name: INTERNAL_ENDPOINT, value: mesh }
           ports:
             - name: http
               containerPort: 5100
@@ -69,14 +77,10 @@ spec:
           volumeMounts:
             - { name: client-key, mountPath: /run/secrets/oauth-agent, readOnly: true }
             - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
-            - { name: internal, mountPath: /run/secrets/internal, readOnly: true }
       volumes:
         - name: client-key
           secret:
             secretName: oauth-agent-client-key
-        - name: internal
-          secret:
-            secretName: oauth-agent-internal
         - name: local-ca
           configMap:
             name: local-ca
@@ -104,3 +108,21 @@ spec:
               service:
                 name: oauth-proxy
                 port: { name: http }
+---
+# Who may call the agent, enforced by Istio (ztunnel) with the caller's mesh identity: anyone on
+# its public port (the proxy passes browsers through, Keycloak reads the key set and sends
+# back-channel logouts) and on metrics; the internal endpoint only the OAuth proxy's service
+# account, over mutual TLS. Everything else is refused, so a call to port 5101 without the proxy's
+# mesh certificate never reaches the agent.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: oauth-agent
+spec:
+  selector:
+    matchLabels: { app: oauth-agent }
+  action: ALLOW
+  rules:
+    - to: [{ operation: { ports: ["5100", "9100"] } }]
+    - from: [{ source: { principals: [cluster.local/ns/auth-api/sa/oauth-proxy] } }]
+      to: [{ operation: { ports: ["5101"] } }]

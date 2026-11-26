@@ -90,7 +90,6 @@ impl ProxyState {
         let tokens = Tokens::new(
             &config.redis_uri,
             &config.agent_internal_url,
-            &config.internal_secret,
             CONNECT_TIMEOUT,
         )?;
         let upstream = reqwest::Client::builder()
@@ -412,7 +411,6 @@ mod tests {
             listen_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             agent_url,
             agent_internal_url: "http://127.0.0.1:1".into(),
-            internal_secret: "secret".into(),
             api_base_url: None,
             redis_uri: "redis://127.0.0.1:1".into(),
             client_ip: ClientIpSource::from_settings(None, None).unwrap(),

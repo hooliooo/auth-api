@@ -1,0 +1,10 @@
+# Istio in ambient mode for the local cluster, one file for the istiod, cni and ztunnel charts
+# (each reads what it knows). No sidecars: ztunnel on each node gives every pod in a namespace
+# labelled istio.io/dataplane-mode=ambient mutual TLS and enforces AuthorizationPolicies. The
+# charts' default requests are sized for large clusters (istiod asks for 2 GiB); a laptop needs
+# far less, so only the requests shrink.
+profile: ambient
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi

@@ -102,17 +102,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listen_addr).await?;
     info!("Listening on {}", listener.local_addr()?);
 
-    // The OAuth proxy's way to a fresh access token, only with a shared secret.
-    if let Ok(secret_file) = std::env::var("INTERNAL_SECRET_FILE") {
-        let secret: Arc<str> = std::fs::read_to_string(&secret_file)?.trim().into();
+    // The OAuth proxy's way to a fresh access token: plain HTTP, so only where the service mesh
+    // encrypts the link and admits only the proxy (see internal.rs).
+    if internal::enabled()? {
         let internal_addr = env::parsed_or(
             "INTERNAL_ADDR",
             SocketAddr::from((Ipv4Addr::UNSPECIFIED, 5101)),
         )?;
-        let internal = internal::routes().with_state(internal::InternalState {
-            app: state.clone(),
-            secret,
-        });
+        let internal = internal::routes().with_state(state.clone());
         let listener = TcpListener::bind(internal_addr).await?;
         info!("Internal endpoint on {}", listener.local_addr()?);
         tokio::spawn(async move {

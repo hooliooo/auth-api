@@ -1,4 +1,8 @@
+# Everything here is in the Istio mesh (ambient mode, installed by dev/k8s/up.sh): pod-to-pod
+# traffic gets mutual TLS from ztunnel, and AuthorizationPolicies decide who may call whom.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: auth-api
+  labels:
+    istio.io/dataplane-mode: ambient

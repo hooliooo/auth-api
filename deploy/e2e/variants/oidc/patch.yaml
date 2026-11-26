@@ -8,7 +8,11 @@ spec:
     spec:
       containers:
         - name: oauth-agent
+          ports:
+            - { containerPort: 5101, $patch: delete }
           env:
+            # Nothing calls a test agent's internal endpoint: it is not served.
+            - { name: INTERNAL_ENDPOINT, $patch: delete }
             - { name: IDENTITY_PROVIDER, value: oidc }
             - { name: REDIRECT_URI, value: https://auth-api-oidc/auth/callback }
             - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
@@ -31,3 +35,20 @@ spec:
               service:
                 name: oauth-agent-oidc
                 port: { name: http }
+---
+# The copied policy would still select the agent under test (kustomize does not rename Istio's
+# selectors), and the test agent serves no internal endpoint to protect.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: oauth-agent
+$patch: delete
+---
+# Nor does its Service offer the port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth-agent
+spec:
+  ports:
+    - { port: 5101, $patch: delete }

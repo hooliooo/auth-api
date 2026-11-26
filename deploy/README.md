@@ -2,8 +2,9 @@
 
 Keycloak and the token handler (the OAuth agent and the OAuth proxy) in a local Kubernetes
 cluster (kind), as close to production as a laptop allows: an ingress controller terminating TLS
-with cert-manager certificates, one public address per service that browsers and pods share, and
-secrets generated at setup rather than kept in the repo.
+with cert-manager certificates, a service mesh (Istio, ambient mode) between the pods, one public
+address per service that browsers and pods share, and secrets generated at setup rather than kept
+in the repo.
 
 ## Once per machine
 
@@ -13,7 +14,7 @@ mkcert -install                     # a local CA, trusted by macOS, Chrome, Safa
 echo "127.0.0.1 keycloak-api auth-api" | sudo tee -a /etc/hosts   # if not there yet
 ```
 
-Docker needs at least 3 GiB of memory (Docker Desktop: Settings > Resources), and ports 80 and
+Docker needs at least 4 GiB of memory (Docker Desktop: Settings > Resources), and ports 80 and
 443 on this machine must be free. `up.sh` checks all of this first and says what to fix.
 
 The first run downloads about 1-2 GB (images, Helm charts, Debian packages) and takes several
@@ -47,6 +48,7 @@ leaves your default context as it was, so a shared cluster in your kubeconfig is
 |---|---|---|
 | Traefik | `deploy/platform/traefik-values.yaml` | the production ingress; serves standard `Ingress` resources and redirects HTTP to HTTPS |
 | cert-manager, `local-ca` issuer | `deploy/platform/cluster-issuer.yaml` | the production issuer (e.g. Let's Encrypt or the company CA); only the issuer resource differs |
+| Istio, ambient mode | `deploy/platform/istio-values.yaml` | the production service mesh: mutual TLS between all pods in `auth-api`, and AuthorizationPolicies |
 | CoreDNS rewrite | `dev/k8s/up.sh` | split-horizon DNS: `keycloak-api` resolves to the ingress inside the cluster too |
 | PostgreSQL | `deploy/k8s/keycloak-postgres.yaml` | the managed database |
 | Keycloak | `deploy/k8s/keycloak.yaml` | Keycloak, from `iam-config/keycloak`, at `https://keycloak-api` |
@@ -61,9 +63,14 @@ need no separate discovery address. Pods that call `https://keycloak-api` must t
 CA: mount the `local-ca` ConfigMap's `ca.crt` (its public certificate, which `up.sh` creates) and
 point `SSL_CERT_FILE` at it, as the OAuth agent does.
 
-The OAuth proxy and the OAuth agent share a secret (`oauth-agent-internal`, made once by `up.sh`):
-the proxy sends it to the OAuth agent's internal endpoint (port 5101, never behind the ingress) when
-an access token needs refreshing, so only the OAuth agent holds the client's credentials.
+When an access token needs refreshing, the OAuth proxy asks the OAuth agent's internal endpoint
+(port 5101, never behind the ingress), so only the OAuth agent holds the client's credentials. The
+mesh secures that call: ztunnel encrypts it with mutual TLS between the two pods' mesh identities,
+and the agent's AuthorizationPolicy (`deploy/k8s/oauth-agent/`) admits only the `oauth-proxy`
+service account to port 5101. The agent serves the endpoint only with `INTERNAL_ENDPOINT=mesh`, a
+declaration that it runs inside such a mesh; nothing in the application holds a secret or a
+certificate for it. Traffic from outside the mesh, such as Traefik's to the proxy, still arrives
+in plain text inside the cluster, as before.
 
 The OAuth agent signs in with its own key (`private_key_jwt`): `up.sh` runs
 `crates/oauth-agent/dev/generate-client-key.sh` once, which writes this machine's key to

@@ -17,9 +17,6 @@ pub enum ConfigError {
     /// A setting is missing or cannot be parsed.
     #[error(transparent)]
     Env(#[from] EnvError),
-    /// The shared secret cannot be read.
-    #[error("cannot read INTERNAL_SECRET_FILE: {0}")]
-    Secret(std::io::Error),
     /// The client IP settings cannot be used.
     #[error(transparent)]
     ClientIp(#[from] ClientIpError),
@@ -32,12 +29,10 @@ pub struct Config {
     /// `AGENT_URL`: the OAuth agent, which answers everything but `/api/*`, e.g.
     /// `http://oauth-agent:5100`.
     pub agent_url: String,
-    /// `AGENT_INTERNAL_URL`: the OAuth agent's internal endpoint, for fresh access tokens.
+    /// `AGENT_INTERNAL_URL`: the OAuth agent's internal endpoint, for fresh access tokens, e.g.
+    /// `http://oauth-agent:5101`; the service mesh encrypts the call and vouches for the proxy.
     pub agent_internal_url: String,
-    /// The secret in `INTERNAL_SECRET_FILE`, sent to the OAuth agent's internal endpoint.
-    pub internal_secret: String,
-    /// `API_BASE_URL`, e.g. `http://api:8080/v1`; without it, `/api/*` answers 503, as the
-    /// OAuth agent's does.
+    /// `API_BASE_URL`, e.g. `http://api:8080/v1`; without it, `/api/*` answers 503.
     pub api_base_url: Option<String>,
     /// `REDIS_URI`: the OAuth agent's sessions.
     pub redis_uri: String,
@@ -64,10 +59,6 @@ fn url(name: &'static str, value: &str) -> Result<String, EnvError> {
 impl Config {
     /// Reads and checks every setting.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let internal_secret = std::fs::read_to_string(env::required("INTERNAL_SECRET_FILE")?)
-            .map_err(ConfigError::Secret)?
-            .trim()
-            .to_owned();
         Ok(Self {
             listen_addr: env::parsed_or(
                 "LISTEN_ADDR",
@@ -75,7 +66,6 @@ impl Config {
             )?,
             agent_url: url("AGENT_URL", &env::required("AGENT_URL")?)?,
             agent_internal_url: url("AGENT_INTERNAL_URL", &env::required("AGENT_INTERNAL_URL")?)?,
-            internal_secret,
             api_base_url: match std::env::var("API_BASE_URL") {
                 Ok(value) => Some(url("API_BASE_URL", &value)?),
                 Err(_) => None,

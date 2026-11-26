@@ -18,8 +18,8 @@
 //! ```
 //!
 //! Settings: `LISTEN_ADDR` (default `0.0.0.0:5200`), `AGENT_URL` (the OAuth agent, e.g.
-//! `http://oauth-agent:5100`), `AGENT_INTERNAL_URL` (e.g. `http://oauth-agent:5101`),
-//! `INTERNAL_SECRET_FILE`, `API_BASE_URL`, `REDIS_URI`, `CLIENT_IP_HEADER` and `TRUSTED_PROXIES`
+//! `http://oauth-agent:5100`), `AGENT_INTERNAL_URL` (e.g. `http://oauth-agent:5101`, which the
+//! service mesh protects), `API_BASE_URL`, `REDIS_URI`, `CLIENT_IP_HEADER` and `TRUSTED_PROXIES`
 //! (as the OAuth agent's), and `METRICS_ADDR` (default `0.0.0.0:9100`).
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 

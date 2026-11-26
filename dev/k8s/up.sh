@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Creates or updates the local Kubernetes cluster (kind) and deploys Keycloak and the OAuth agent to
-# it, served at https://keycloak-api and https://auth-api with certificates from the local
-# development CA.
+# Creates or updates the local Kubernetes cluster (kind) with Istio in ambient mode, and deploys
+# Keycloak and the token handler to it, served at https://keycloak-api and https://auth-api with
+# certificates from the local development CA.
 #
 # Once per machine: brew install kind helm mkcert nss && mkcert -install
 # and in /etc/hosts:  127.0.0.1 keycloak-api auth-api
@@ -39,8 +39,8 @@ elif ! docker info >/dev/null 2>&1; then
   problems+=("Docker is not running: start Docker Desktop (or the Docker daemon)")
 else
   memory=$(docker info --format '{{.MemTotal}}')
-  if (( memory < 3 * 1024 * 1024 * 1024 )); then
-    problems+=("Docker has $((memory / 1024 / 1024)) MiB of memory; Keycloak and PostgreSQL need at least 3 GiB (Docker Desktop: Settings > Resources)")
+  if (( memory < 4 * 1024 * 1024 * 1024 )); then
+    problems+=("Docker has $((memory / 1024 / 1024)) MiB of memory; Keycloak, PostgreSQL and Istio need at least 4 GiB (Docker Desktop: Settings > Resources)")
   fi
 fi
 if ! grep -Eq '^[[:space:]]*127\.0\.0\.1[[:space:]]([^#]*[[:space:]])?keycloak-api([[:space:]]|$)' /etc/hosts; then
@@ -89,6 +89,17 @@ k -n cert-manager create secret tls local-ca \
   --dry-run=client -o yaml | k apply -f -
 k apply -f "$root/deploy/platform/cluster-issuer.yaml"
 
+step "Service mesh (Istio, ambient mode)"
+# Mutual TLS between the pods of namespace auth-api, and the AuthorizationPolicy that admits only
+# the OAuth proxy to the OAuth agent's internal endpoint (deploy/k8s/oauth-agent).
+helm repo add istio https://istio-release.storage.googleapis.com/charts >/dev/null 2>&1 || true
+helm repo update istio >/dev/null
+for chart in base istiod cni ztunnel; do
+  release=$chart; [[ $chart == cni ]] && release=istio-cni; [[ $chart == base ]] && release=istio-base
+  h upgrade --install "$release" "istio/$chart" --namespace istio-system --create-namespace \
+    --version 1.30.8 --values "$root/deploy/platform/istio-values.yaml" --wait
+done
+
 step "In-cluster DNS: the public names resolve to the ingress"
 # Pods then reach https://keycloak-api exactly as browsers do, like split-horizon DNS in
 # production. Each name gets a rewrite block ahead of the kubernetes plugin.
@@ -131,8 +142,6 @@ random() { openssl rand -base64 24 | tr -d '/+=' | head -c 24; }
 secret_once keycloak-admin username=admin "password=$(random)"
 secret_once keycloak-db "password=$(random)"
 secret_once keycloak-clients "api-client-secret=$(random)" "end-to-end-client-secret=$(random)"
-# Between the OAuth proxy and the OAuth agent's internal endpoint.
-secret_once oauth-agent-internal "secret=$(random)"
 k -n auth-api create configmap keycloak-config-scripts \
   --from-file="$root/iam-config/keycloak-config/setup-scripts" \
   --dry-run=client -o yaml | k apply -f -

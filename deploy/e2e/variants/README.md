@@ -11,5 +11,8 @@ address behind the ingress:
 - `untrusted/`, `oauth-agent-untrusted` at `https://auth-api-untrusted`: trusts no proxy, so its
   client address header is ignored whoever sets it.
 
+Neither opens the internal endpoint (port 5101) or carries an AuthorizationPolicy: the OAuth proxy
+only ever calls the agent under test, so the test agents have no internal endpoint to protect.
+
 The tests reach both names without hosts-file entries: they resolve them to the ingress
 themselves.

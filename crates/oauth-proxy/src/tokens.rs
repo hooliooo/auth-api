@@ -1,7 +1,8 @@
 //! How a session cookie becomes an access token: the session the OAuth agent keeps in Redis, or,
 //! when its token is about to expire, a fresh one from the OAuth agent's internal endpoint
 //! (`crates/oauth-agent/src/internal.rs`). The proxy holds no credentials for the identity
-//! provider; the OAuth agent refreshes once per session, under its Redis lock.
+//! provider; the OAuth agent refreshes once per session, under its Redis lock. The service mesh
+//! encrypts the call and is what lets the proxy, and only the proxy, reach that endpoint.
 
 use std::{sync::Arc, time::Duration};
 
@@ -9,7 +10,7 @@ use axum::http::StatusCode;
 use redis::{AsyncCommands, aio::ConnectionManager};
 use token_handler_common::{
     causes::with_causes,
-    internal::{AccessToken, PATH, SECRET_HEADER, SESSION_HEADER},
+    internal::{AccessToken, PATH, SESSION_HEADER},
     session::{self, session_key},
 };
 use tokio::sync::OnceCell;
@@ -29,17 +30,14 @@ pub struct Tokens {
     http: reqwest::Client,
     /// The internal endpoint's URL.
     internal_url: Arc<str>,
-    /// The secret it requires.
-    secret: Arc<str>,
 }
 
 impl Tokens {
     /// Tokens from the sessions in `redis_uri`, refreshed through the OAuth agent's internal
-    /// endpoint at `agent_internal_url` with `secret`.
+    /// endpoint at `agent_internal_url`.
     pub fn new(
         redis_uri: &str,
         agent_internal_url: &str,
-        secret: &str,
         connect_timeout: Duration,
     ) -> reqwest::Result<Self> {
         Ok(Self {
@@ -50,7 +48,6 @@ impl Tokens {
                 .timeout(INTERNAL_TIMEOUT)
                 .build()?,
             internal_url: format!("{agent_internal_url}{PATH}").into(),
-            secret: secret.into(),
         })
     }
 
@@ -90,7 +87,6 @@ impl Tokens {
         let response = self
             .http
             .post(&*self.internal_url)
-            .header(SECRET_HEADER, &*self.secret)
             .header(SESSION_HEADER, sid)
             .send()
             .await
