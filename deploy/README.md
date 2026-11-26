@@ -78,6 +78,24 @@ The OAuth agent signs in with its own key (`private_key_jwt`): `up.sh` runs
 `oauth-agent-client-key` secret. Keycloak fetches the matching public key from the OAuth agent
 itself.
 
+## Logs
+
+Both services log one JSON object per line (`LOG_FORMAT=json`, at `RUST_LOG=info`): failures,
+dependency outages, and one line at startup with how each is configured. Successful requests log
+nothing; the metrics count them. Every line about a request carries its `id`, the same in both
+services and on the API call (`x-request-id`), so one request can be followed from the proxy to
+the agent's refresh. A dependency that fails (Redis, Keycloak, the agent, the API) is logged
+once when it starts failing and once when it is back, with how many failures there were, not on
+every request. Tokens, cookies, session ids and query strings are never logged.
+
+```sh
+kubectl --context kind-auth-api -n auth-api logs deploy/oauth-proxy        # or deploy/oauth-agent
+kubectl --context kind-auth-api -n auth-api logs deploy/oauth-agent | jq 'select(.level != "INFO")'
+```
+
+Set `LOG_FORMAT=text` for lines meant for people, and `RUST_LOG=oauth_agent=debug,info` (or
+`oauth_proxy=debug,info`) to see routine refusals too.
+
 ## How the certificates work
 
 There is one local certificate authority (CA), made by mkcert, and every certificate in the

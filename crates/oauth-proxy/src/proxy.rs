@@ -60,12 +60,14 @@ use token_handler_common::{
     causes::with_causes,
     cookie,
     csrf::{self, CSRF_HEADER, PathRule},
-    metrics, request_id,
+    metrics,
+    request_id::{self, REQUEST_ID_HEADER},
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     config::{CONNECT_TIMEOUT, Config, READ_TIMEOUT},
+    outages,
     tokens::Tokens,
 };
 
@@ -118,12 +120,13 @@ pub fn router(state: ProxyState) -> Router {
             csrf::require_header,
         ))
         // Outside the CSRF check, so refused requests are counted too.
-        .layer(middleware::from_fn(metrics::track))
-        // Outermost, so even refused requests get an id.
-        .layer(middleware::from_fn(request_id::middleware));
+        .layer(middleware::from_fn(metrics::track));
     Router::new()
         .merge(api)
         .fallback(to_agent)
+        // Outermost and on every request, so even refused ones get an id, and the id travels
+        // on to the API and the OAuth agent: one id across both services' logs.
+        .layer(middleware::from_fn(request_id::middleware))
         .with_state(state)
 }
 
@@ -156,9 +159,10 @@ async fn forward_to_api(
     request: Request,
 ) -> Result<Response, StatusCode> {
     let sid = cookie::get(request.headers(), cookie::SESSION).ok_or(StatusCode::UNAUTHORIZED)?;
+    let request_id = request.headers().get(REQUEST_ID_HEADER).cloned();
     let token = state
         .tokens
-        .access_token(&sid)
+        .access_token(&sid, request_id.as_ref())
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let base = state
@@ -182,9 +186,10 @@ async fn forward_to_api(
         .send()
         .await
         .map_err(|error| {
-            warn!(error = %with_causes(&error), "the API cannot be reached");
+            outages::API.failed(&with_causes(&error));
             StatusCode::BAD_GATEWAY
         })?;
+    outages::API.ok();
     Ok(relay(response, from_api))
 }
 
@@ -205,9 +210,12 @@ async fn to_agent(State(state): State<ProxyState>, request: Request) -> Response
         .send()
         .await
     {
-        Ok(response) => relay(response, strip_connection_only),
+        Ok(response) => {
+            outages::AGENT.ok();
+            relay(response, strip_connection_only)
+        }
         Err(error) => {
-            warn!(error = %with_causes(&error), "the OAuth agent cannot be reached");
+            outages::AGENT.failed(&with_causes(&error));
             StatusCode::BAD_GATEWAY.into_response()
         }
     }
@@ -394,7 +402,13 @@ mod tests {
                             .unwrap_or("")
                             .to_owned()
                     };
-                    format!("{}|{}", get(header::HOST), get(header::COOKIE)).into_response()
+                    format!(
+                        "{}|{}|{}",
+                        get(header::HOST),
+                        get(header::COOKIE),
+                        get(header::HeaderName::from_static("x-request-id"))
+                    )
+                    .into_response()
                 }),
             );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -446,7 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn given_a_agent_route_then_host_and_cookies_pass_unchanged() {
+    async fn given_an_agent_route_then_host_and_cookies_pass_unchanged() {
         let response = proxy(fake_agent().await)
             .oneshot(from_browser(
                 Request::get("/echo")
@@ -459,7 +473,42 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .unwrap();
-        assert_eq!(&body[..], b"auth-api|__Host-Http-session=sid");
+        assert!(body.starts_with(b"auth-api|__Host-Http-session=sid|"));
+    }
+
+    #[tokio::test]
+    async fn given_an_agent_route_then_the_agent_gets_the_id_the_browser_gets_back() {
+        let response = proxy(fake_agent().await)
+            .oneshot(from_browser(Request::get("/echo")))
+            .await
+            .unwrap();
+
+        let id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let seen = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(seen.rsplit('|').next(), Some(id.as_str()));
+        assert!(!id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_a_request_id_from_the_caller_then_the_agent_keeps_it() {
+        let response = proxy(fake_agent().await)
+            .oneshot(from_browser(
+                Request::get("/echo").header("x-request-id", "trace-from-the-edge-42"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.headers()["x-request-id"], "trace-from-the-edge-42");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(body.ends_with(b"|trace-from-the-edge-42"));
     }
 
     #[tokio::test]

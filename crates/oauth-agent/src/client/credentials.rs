@@ -78,6 +78,14 @@ pub enum Credentials {
 }
 
 impl Credentials {
+    /// How it authenticates, as in `CLIENT_CREDENTIALS`.
+    pub fn method(&self) -> &'static str {
+        match self {
+            Self::Secret(_) => "client_secret",
+            Self::PrivateKeyJwt { .. } => "private_key_jwt",
+        }
+    }
+
     /// Reads `CLIENT_CREDENTIALS` (`client_secret`, the default, or `private_key_jwt`) and what it
     /// needs: `CLIENT_SECRET`, or `CLIENT_KEY_FILE`, optionally `CLIENT_KEY_ID`, and
     /// optionally `CLIENT_NEXT_KEY_FILE` / `CLIENT_NEXT_KEY_ID` for a rotation.

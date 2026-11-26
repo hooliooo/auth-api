@@ -38,7 +38,9 @@ spec:
           image: auth-api/oauth-proxy:dev
           imagePullPolicy: Never
           env:
-            - { name: RUST_LOG, value: "oauth_proxy=debug,info" }
+            # One JSON object per line for the log pipeline; info: failures, outages, startup.
+            - { name: RUST_LOG, value: info }
+            - { name: LOG_FORMAT, value: json }
             - { name: AGENT_URL, value: "http://oauth-agent:5100" }
             - { name: AGENT_INTERNAL_URL, value: "http://oauth-agent:5101" }
             - { name: REDIS_URI, value: redis://redis:6379 }

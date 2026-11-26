@@ -5,9 +5,10 @@ use axum::response::{IntoResponse, Response};
 use oidc::VerificationError;
 use redis::RedisError;
 use thiserror::Error;
-use tracing::{debug, error};
+use token_handler_common::causes::with_causes;
+use tracing::{debug, error, warn};
 
-use crate::auth::LoginError;
+use crate::{auth::LoginError, outages};
 use token_handler_common::random::RandomUnvailable;
 
 /// Why a request failed; maps to the HTTP status the client sees.
@@ -55,20 +56,46 @@ impl IntoResponse for AppError {
         if let AppError::TooManyRequests { retry_after } = self {
             use axum::http::header::RETRY_AFTER;
 
-            debug!(retry_after, "rate limited");
+            self.report();
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 [(RETRY_AFTER, retry_after.to_string())],
             )
                 .into_response();
         }
-        let status = status_of(&self);
-        if status.is_server_error() {
-            error!(error = %self, "request failed");
-        } else {
-            debug!(error = %self, "request failed")
+        self.report();
+        status_of(&self).into_response()
+    }
+}
+
+impl AppError {
+    /// Logs this error at the level it deserves: a dependency's failure through its outage (once,
+    /// not per request), the identity provider refusing a sign-in as a warning, the OAuth agent's
+    /// own failures as errors with their causes, and refusals of a browser's request at `debug`.
+    pub(crate) fn report(&self) {
+        match self {
+            AppError::Redis(error) => {
+                outages::REDIS.failed(&with_causes(error));
+            }
+            AppError::RefreshAccessTokenFailed(error) => {
+                outages::PROVIDER.failed(error);
+            }
+            AppError::LoginError(
+                LoginError::ProviderUnavailable(_)
+                | LoginError::VerificationError(VerificationError::ProviderUnavailable(_)),
+            ) => {
+                outages::PROVIDER.failed(&with_causes(self));
+            }
+            AppError::LoginError(LoginError::CodeExchangeError(_)) => {
+                warn!(error = %with_causes(self), "the identity provider refused the code exchange");
+            }
+            #[cfg(feature = "rate-limit")]
+            AppError::TooManyRequests { retry_after } => debug!(retry_after, "rate limited"),
+            _ if status_of(self).is_server_error() => {
+                error!(error = %with_causes(self), "request failed");
+            }
+            _ => debug!(error = %self, "request refused"),
         }
-        status.into_response()
     }
 }
 
@@ -78,9 +105,10 @@ impl IntoResponse for AppError {
 fn status_of(error: &AppError) -> StatusCode {
     match error {
         // Not the token's fault: the provider's keys could not be fetched to check it.
-        AppError::LoginError(LoginError::VerificationError(
-            VerificationError::ProviderUnavailable(_),
-        )) => StatusCode::SERVICE_UNAVAILABLE,
+        AppError::LoginError(
+            LoginError::ProviderUnavailable(_)
+            | LoginError::VerificationError(VerificationError::ProviderUnavailable(_)),
+        ) => StatusCode::SERVICE_UNAVAILABLE,
         AppError::LoginError(_) | AppError::Unauthorized => StatusCode::UNAUTHORIZED,
         AppError::RefreshAccessTokenFailed(_) => StatusCode::BAD_GATEWAY,
         AppError::Redis(_) => StatusCode::SERVICE_UNAVAILABLE,

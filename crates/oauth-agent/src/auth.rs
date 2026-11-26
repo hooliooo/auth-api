@@ -36,7 +36,7 @@ use token_handler_common::{
 use crate::{
     error::AppError,
     identity_provider::{IdentityProvider, Logout},
-    metrics,
+    metrics, outages,
     pkce::{CodeVerifier, PkceError, S256},
     session::{self, CurrentSession},
     state::AppState,
@@ -64,9 +64,12 @@ pub fn routes() -> Router<AppState> {
 /// Why a sign-in, logout or token check failed.
 #[derive(Debug, Error)]
 pub enum LoginError {
-    /// The identity provider did not exchange the code for tokens.
+    /// The identity provider refused to exchange the code for tokens (a 4xx).
     #[error("Code exchange error: '{0}'")]
     CodeExchangeError(String),
+    /// The identity provider could not be reached, or failed, while exchanging the code.
+    #[error("identity provider unavailable: {0}")]
+    ProviderUnavailable(String),
     /// The login cookie is missing or unusable.
     #[error("Cookie error: '{0}'")]
     CookieError(String),
@@ -283,13 +286,29 @@ async fn callback(
         }
         Err(error) => {
             metrics::counter("token_handler_sign_ins_total", &[("outcome", "failed")]);
-            warn!(%error, "sign-in could not be completed");
+            log_failed_sign_in(&error);
             let mut response = Redirect::to(LOGIN_FAILED_PATH).into_response();
             if let Some(Ok(clear)) = login_cookie.map(|name| cookie::clear(&name, "Lax")) {
                 response.headers_mut().append(SET_COOKIE, clear);
             }
             no_store(response)
         }
+    }
+}
+
+/// Logs a sign-in that could not be completed, as loudly as its cause deserves: a stale or
+/// replayed callback, a missing cookie or a sign-in the user cancelled is routine (`info`);
+/// anything else is reported as the error it is.
+fn log_failed_sign_in(error: &AppError) {
+    match error {
+        AppError::LoginError(
+            LoginError::CookieError(_)
+            | LoginError::InvalidCallbackQuery
+            | LoginError::InvalidPendingLogin
+            | LoginError::InvalidStateParam
+            | LoginError::SignIn,
+        ) => info!(%error, "sign-in not completed"),
+        _ => error.report(),
     }
 }
 
@@ -302,7 +321,8 @@ async fn complete_sign_in(
     q: CallbackQuery,
 ) -> Result<Response, AppError> {
     if let Some(error) = q.error.as_deref() {
-        warn!(error, description = ?q.error_description, "IAM rejected sign-in");
+        // The user cancelled, or the provider declined them: theirs to retry, not a fault here.
+        info!(error, description = ?q.error_description, "the identity provider ended the sign-in");
         return Err(LoginError::SignIn.into());
     }
 
@@ -404,9 +424,14 @@ async fn exchange_code(
         .form(&form)
         .send()
         .await
-        .map_err(|err| LoginError::CodeExchangeError(with_causes(&err)))?;
-    if !response.status().is_success() {
-        let status = response.status();
+        .map_err(|err| LoginError::ProviderUnavailable(with_causes(&err)))?;
+    let status = response.status();
+    if status.is_server_error() {
+        return Err(
+            LoginError::ProviderUnavailable(format!("code exchange returned {status}")).into(),
+        );
+    }
+    if !status.is_success() {
         return Err(
             LoginError::CodeExchangeError(format!("Code exchange returned a {status}")).into(),
         );
@@ -415,6 +440,7 @@ async fn exchange_code(
         .json::<TokenResponse>()
         .await
         .map_err(|e| LoginError::CodeExchangeError(with_causes(&e)))?;
+    outages::PROVIDER.ok();
     Ok(result)
 }
 

@@ -1,9 +1,9 @@
 //! Liveness (`/health`) and readiness (`/health/ready`, which needs Redis) checks.
 
 use axum::{Router, extract::State, http::StatusCode, routing::get};
-use tracing::warn;
+use token_handler_common::causes::with_causes;
 
-use crate::state::AppState;
+use crate::{outages, state::AppState};
 
 /// Routes for the health checks
 pub fn routes() -> Router<AppState> {
@@ -19,9 +19,12 @@ fn health<S: Clone + Send + Sync + 'static>() -> Router<S> {
 async fn ready(State(app_state): State<AppState>) -> StatusCode {
     let mut redis = app_state.redis.clone();
     match redis::cmd("PING").query_async::<String>(&mut redis).await {
-        Ok(_) => StatusCode::OK,
+        Ok(_) => {
+            outages::REDIS.ok();
+            StatusCode::OK
+        }
         Err(error) => {
-            warn!(%error, "Redis is unreachable");
+            outages::REDIS.failed(&with_causes(&error));
             StatusCode::SERVICE_UNAVAILABLE
         }
     }

@@ -5,7 +5,7 @@ use redis::{AsyncCommands, Script, aio::ConnectionManager};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{info, warn};
 
 use token_handler_common::{
     causes::with_causes,
@@ -17,7 +17,7 @@ use token_handler_common::{
     time::now,
 };
 
-use crate::{error::AppError, metrics, state::AppState};
+use crate::{error::AppError, metrics, outages, state::AppState};
 
 /// How long a session lasts when the identity provider does not say how long its own session
 /// lasts. Otherwise a session ends exactly when the provider's would.
@@ -303,13 +303,15 @@ async fn refresh_locked(
                 "token_handler_token_refreshes_total",
                 &[("outcome", "refreshed")],
             );
+            outages::PROVIDER.ok();
         }
         StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED => {
             metrics::counter(
                 "token_handler_token_refreshes_total",
                 &[("outcome", "rejected")],
             );
-            warn!(status = %response.status(), "refresh token rejected; ending session");
+            // The provider's session ended (idle, at its maximum, or signed out): routine.
+            info!(status = %response.status(), "refresh token rejected; ending session");
             delete(redis, sid, session.sid.as_deref()).await?;
             return Ok(None);
         }

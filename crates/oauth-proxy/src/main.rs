@@ -20,10 +20,12 @@
 //! Settings: `LISTEN_ADDR` (default `0.0.0.0:5200`), `AGENT_URL` (the OAuth agent, e.g.
 //! `http://oauth-agent:5100`), `AGENT_INTERNAL_URL` (e.g. `http://oauth-agent:5101`, which the
 //! service mesh protects), `API_BASE_URL`, `REDIS_URI`, `CLIENT_IP_HEADER` and `TRUSTED_PROXIES`
-//! (as the OAuth agent's), and `METRICS_ADDR` (default `0.0.0.0:9100`).
+//! (as the OAuth agent's), `METRICS_ADDR` (default `0.0.0.0:9100`), and `RUST_LOG` and
+//! `LOG_FORMAT` (see [`token_handler_common::logging`]).
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 mod config;
+mod outages;
 mod proxy;
 mod tokens;
 
@@ -51,6 +53,13 @@ async fn main() -> ExitCode {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
     let listen_addr = config.listen_addr;
+    info!(
+        agent_url = %config.agent_url,
+        agent_internal_url = %config.agent_internal_url,
+        api_base_url = config.api_base_url.as_deref().unwrap_or("none: /api/* answers 503"),
+        client_address = %config.client_ip,
+        "OAuth proxy configured"
+    );
     tokio::spawn(token_handler_common::metrics::serve(config.metrics_addr));
 
     let app = proxy::router(ProxyState::new(config)?);

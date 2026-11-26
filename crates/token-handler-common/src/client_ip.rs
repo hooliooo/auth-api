@@ -88,6 +88,21 @@ pub struct ClientIpSource {
     trusted_proxies: Vec<IpRange>,
 }
 
+impl std::fmt::Display for ClientIpSource {
+    /// Where the address is read from, for the startup log: `the connection`, or the header and
+    /// how many trusted ranges may set it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.header {
+            None => f.write_str("the connection"),
+            Some(header) => write!(
+                f,
+                "{header} from {} trusted range(s), else the connection",
+                self.trusted_proxies.len()
+            ),
+        }
+    }
+}
+
 impl ClientIpSource {
     /// Builds the source from `CLIENT_IP_HEADER` and `TRUSTED_PROXIES`, as
     /// [`Self::from_settings`].

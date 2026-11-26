@@ -30,6 +30,7 @@ mod health;
 mod identity_provider;
 mod internal;
 mod metrics;
+mod outages;
 mod pkce;
 #[cfg(feature = "rate-limit")]
 mod rate_limit;
@@ -100,6 +101,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, 5100)),
     )?;
     let listener = TcpListener::bind(listen_addr).await?;
+    let config = &state.oidc.config;
+    info!(
+        issuer = %config.issuer,
+        provider = config.provider.setting(),
+        client_id = %config.client_id,
+        client_credentials = config.client_credentials.method(),
+        scopes = %config.scopes,
+        redirect_uri = %config.redirect_uri,
+        internal_endpoint = internal::enabled()?,
+        "OAuth agent configured"
+    );
+    #[cfg(feature = "rate-limit")]
+    info!(
+        per_minute = state.login_per_minute,
+        client_address = %state.client_ip,
+        "sign-in rate limit"
+    );
     info!("Listening on {}", listener.local_addr()?);
 
     // The OAuth proxy's way to a fresh access token: plain HTTP, so only where the service mesh
@@ -109,7 +127,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "INTERNAL_ADDR",
             SocketAddr::from((Ipv4Addr::UNSPECIFIED, 5101)),
         )?;
-        let internal = internal::routes().with_state(state.clone());
+        // Keeps the proxy's request id, so a refresh logs under the API call that needed it.
+        let internal = internal::routes()
+            .with_state(state.clone())
+            .layer(middleware::from_fn(
+                token_handler_common::request_id::middleware,
+            ));
         let listener = TcpListener::bind(internal_addr).await?;
         info!("Internal endpoint on {}", listener.local_addr()?);
         tokio::spawn(async move {

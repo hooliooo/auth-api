@@ -42,7 +42,9 @@ spec:
           image: auth-api/oauth-agent:dev
           imagePullPolicy: Never
           env:
-            - { name: RUST_LOG, value: "oauth_agent=debug,oidc=debug,info" }
+            # One JSON object per line for the log pipeline; info: failures, outages, startup.
+            - { name: RUST_LOG, value: info }
+            - { name: LOG_FORMAT, value: json }
             - { name: ISSUER_URI, value: https://keycloak-api/realms/test }
             - { name: CLIENT_ID, value: oauth-agent }
             - { name: IDENTITY_PROVIDER, value: keycloak }

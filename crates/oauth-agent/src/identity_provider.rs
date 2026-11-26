@@ -31,6 +31,14 @@ pub(crate) enum IdentityProvider {
 }
 
 impl IdentityProvider {
+    /// Its `IDENTITY_PROVIDER` value.
+    pub fn setting(self) -> &'static str {
+        match self {
+            Self::StandardOidc => "oidc",
+            Self::Keycloak => "keycloak",
+        }
+    }
+
     /// Reads the required `IDENTITY_PROVIDER`: `oidc` or `keycloak`. There is no default: a
     /// Keycloak deployment that fell back to `oidc` would silently drop Keycloak's checks.
     pub fn from_env() -> Result<Self, StartupError> {

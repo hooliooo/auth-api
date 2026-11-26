@@ -8,7 +8,7 @@ use tracing::{Instrument, info_span};
 use crate::random::random_token;
 
 /// Header carrying the request id.
-const REQUEST_ID_HEADER: &str = "x-request-id";
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Whether an incoming `id` looks like a request id and may be kept; anything else is
 /// replaced, so a client cannot write arbitrary text into the logs.

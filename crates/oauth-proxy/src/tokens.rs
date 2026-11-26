@@ -6,15 +6,18 @@
 
 use std::{sync::Arc, time::Duration};
 
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use redis::{AsyncCommands, aio::ConnectionManager};
 use token_handler_common::{
     causes::with_causes,
     internal::{AccessToken, PATH, SESSION_HEADER},
+    request_id::REQUEST_ID_HEADER,
     session::{self, session_key},
 };
 use tokio::sync::OnceCell;
 use tracing::warn;
+
+use crate::outages;
 
 /// Total time the OAuth agent's internal endpoint may take; it may wait on the identity provider.
 const INTERNAL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -62,7 +65,7 @@ impl Tokens {
             .await
             .cloned()
             .map_err(|error| {
-                warn!(error = %with_causes(&error), "Redis unavailable");
+                outages::REDIS.failed(&with_causes(&error));
                 StatusCode::SERVICE_UNAVAILABLE
             })
     }
@@ -70,13 +73,19 @@ impl Tokens {
     /// An access token for session `sid` valid for at least another minute: the session's own, or a
     /// fresh one from the OAuth agent. `None` if the session is gone or has ended; otherwise the
     /// status to answer: 503 if Redis or the identity provider is unavailable, 502 if the OAuth
-    /// agent cannot be reached or answers unexpectedly.
-    pub async fn access_token(&self, sid: &str) -> Result<Option<String>, StatusCode> {
+    /// agent cannot be reached or answers unexpectedly. `request_id` goes along to the agent, so
+    /// its logs of a refresh carry the API call's id.
+    pub async fn access_token(
+        &self,
+        sid: &str,
+        request_id: Option<&HeaderValue>,
+    ) -> Result<Option<String>, StatusCode> {
         let mut redis = self.redis().await?;
         let raw: Option<Vec<u8>> = redis.get(session_key(sid)).await.map_err(|error| {
-            warn!(error = %with_causes(&error), "session not read");
+            outages::REDIS.failed(&with_causes(&error));
             StatusCode::SERVICE_UNAVAILABLE
         })?;
+        outages::REDIS.ok();
         let Some(session) = raw.and_then(|raw| session::open(sid, &raw)) else {
             return Ok(None);
         };
@@ -84,16 +93,18 @@ impl Tokens {
             return Ok(Some(token.to_owned()));
         }
         // Expiring, or past the 24-hour cap: the OAuth agent refreshes or ends it.
-        let response = self
+        let mut call = self
             .http
             .post(&*self.internal_url)
-            .header(SESSION_HEADER, sid)
-            .send()
-            .await
-            .map_err(|error| {
-                warn!(error = %with_causes(&error), "the OAuth agent's internal endpoint is unreachable");
-                StatusCode::BAD_GATEWAY
-            })?;
+            .header(SESSION_HEADER, sid);
+        if let Some(id) = request_id {
+            call = call.header(REQUEST_ID_HEADER, id);
+        }
+        let response = call.send().await.map_err(|error| {
+            outages::AGENT.failed(&with_causes(&error));
+            StatusCode::BAD_GATEWAY
+        })?;
+        outages::AGENT.ok();
         match response.status() {
             StatusCode::OK => {
                 let fresh: AccessToken =
